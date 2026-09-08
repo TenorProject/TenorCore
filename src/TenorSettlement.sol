@@ -118,8 +118,9 @@ contract TenorSettlement {
         s.haircutBps = r.haircutBps; s.openHoldId = r.openHoldId;
 
         // 3. return-leg hold over the lender's new balance, so closeRepo has something to move
-        // TODO(day 1): operatorCreateHoldByPartition, escrow = address(this),
-        //              expiration = maturity + buffer. Store s.closeHoldId.
+        // TODO(day 1): createHoldFromByPartition(partition, lender, hold, operatorData),
+        //              escrow = address(this), expiration = maturity + buffer. Store s.closeHoldId.
+        //              NOT operatorCreateHoldByPartition: that name does not exist on the diamond.
 
         // 4. hand the unwind to the network
         s.scheduleAddress = _scheduleUnwind(id, r.maturity);
@@ -189,7 +190,7 @@ contract TenorSettlement {
             }),
             r.borrower,
             r.collateralQty
-        ) returns (bool) {
+        ) returns (bool, bytes32) {
             r.status = Status.Closed;
             emit RepoClosed(id, r.repurchase, r.collateralQty);
         } catch {
