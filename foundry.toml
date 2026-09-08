@@ -2,5 +2,15 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 100
+# Matches Asset Tokenization Studio's own hardhat config. Mismatched compiler settings
+# against a diamond produce failures that look like permissions bugs.
 
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+[rpc_endpoints]
+hedera_testnet = "https://testnet.hashio.io/api"
+
+# HashScan verifies through Sourcify:
+#   forge verify-contract <addr> <Contract> --verifier sourcify --rpc-url hedera_testnet
