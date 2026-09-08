@@ -13,8 +13,6 @@ docs/
 # Dotenv file
 .env
 
-# Libraries
-lib/
 
 # Claude Code per-developer settings
 .claude/settings.local.json
