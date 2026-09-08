@@ -6,6 +6,9 @@ solc = "0.8.28"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 100
+via_ir = true
+# via_ir avoids "stack too deep" in openRepo (calldata struct + wide event). Codegen only;
+# does not change evm_version/optimizer_runs, so it doesn't affect ABI compatibility with ATS.
 # Matches Asset Tokenization Studio's own hardhat config. Mismatched compiler settings
 # against a diamond produce failures that look like permissions bugs.
 
