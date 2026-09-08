@@ -1,0 +1,15 @@
+{
+  "extraKnownMarketplaces": {
+    "hedera": {
+      "source": {
+        "source": "github",
+        "repo": "hedera-dev/hedera-skills"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "system-contracts@hedera": true,
+    "native-services-js@hedera": true,
+    "hackathon-helper@hedera": true
+  }
+}

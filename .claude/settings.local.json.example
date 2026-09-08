@@ -1,0 +1,5 @@
+{
+  "env": {
+    "HEDERA_ACCOUNT_ID": "0.0.YOUR_ACCOUNT_ID"
+  }
+}

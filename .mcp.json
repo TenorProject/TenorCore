@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "hedera-docs": {
+      "type": "http",
+      "url": "https://docs.hedera.com/mcp"
+    },
+    "hedera-testnet": {
+      "type": "http",
+      "url": "https://agentic-testnet-mcp.hedera.com/mcp",
+      "headers": {
+        "x-hedera-account-id": "${HEDERA_ACCOUNT_ID}"
+      }
+    }
+  }
+}
