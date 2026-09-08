@@ -3,6 +3,22 @@ name: tenor-hedera
 description: Hard-won facts about Hedera, Asset Tokenization Studio v8.0.0 and HIP-1215 scheduled calls, verified against source code and testnet during the Tenor build. Load before writing or debugging any Solidity, script or service in this repo, and before trusting Hedera or ATS documentation.
 ---
 
+## Context for this repository
+
+Tenor is an open-source hackathon project for ETHGlobal ETHOnline 2026, running entirely on
+**Hedera testnet**. The bond used throughout was issued by this team, on testnet, and this team
+holds the issuer roles on it. Everything below is integration knowledge about Hedera's own
+Asset Tokenization Studio, gathered while building a settlement layer on top of it, and was
+verified against the published open-source contracts at v8.0.0 or measured on public testnet.
+
+`TenorIdentityRegistry` and `TenorCompliance` in `src/periphery/` are minimal implementations of
+two interfaces ATS **requires**: an ERC-3643 identity registry and compliance module. Without both,
+every mint and transfer of an ATS security reverts. ATS ships neither, and its production
+credential path depends on issuer infrastructure that is not available for a testnet demo. Their
+permissive `testnetPermitAll` flag is a development default for a token we issued ourselves; it is
+switched off and replaced with an explicit two-address allowlist before the demo, so that the
+compliance rejection is a real one.
+
 # Tenor: verified Hedera and ATS facts
 
 Everything here was confirmed against ATS source at v8.0.0 (commit `be4f860e`, 2026-06-24) or
@@ -48,7 +64,7 @@ function hasScheduleCapacity(uint256 expirySecond, uint256 gasLimit) external vi
 - A scheduled transaction **fires once and never retries**. A revert is a settlement that silently
   did not happen.
 
-## Units, a ten-order-of-magnitude trap
+## Units: a ten-order-of-magnitude mismatch
 
 - `address(this).balance` returns **tinybars** (8 decimals). 20 HBAR reads as `2000000000`.
 - `msg.value` on a payable call arrives in **weibar** (18 decimals).
@@ -69,7 +85,7 @@ entirely ours. Copy the pattern from Mass Payout's `LifeCycleCashFlow.sol` (`ass
 
 **ATS ships no DvP, no atomic swap, no HTLC.** `docs/ats/user-guides/hold-operations.md` describes a
 DvP flow using a "lock hash" and recommends it for HTLCs. **There is no lock hash.** No hash field on
-the `Hold` struct, zero hits for preimage or secret across all Solidity. Do not plan around it.
+the `Hold` struct, no hash-lock fields exist anywhere in the Solidity. Do not plan around it.
 
 **Holds are the settlement primitive.**
 ```solidity
@@ -82,14 +98,14 @@ struct Hold { uint256 amount; uint256 expirationTimestamp; address escrow; addre
 - Expiration is mandatory. **After expiry anyone can permissionlessly reclaim to the holder.**
   Always assert hold expiry outlives any schedule that depends on it.
 
-**Clearing is a global mutually-exclusive mode.** While active, normal transfers, redeems, hold
+**Clearing is a global mutually-exclusive mode (a configuration constraint).** While active, normal transfers, redeems, hold
 creation *and maturity redemption* all revert. Do not enable it.
 
 **Compliance chain, in the order it fails:**
 ```solidity
 verifyKycStatus = (!internalKycActivated || status == GRANTED) && isExternallyGranted(...)
 ```
-The external branch is ANDed **unconditionally**; deactivating internal KYC does not bypass it. Zero
+The external branch is ANDed **unconditionally**; the internal setting alone does not determine the outcome. Zero
 external lists passes vacuously. Then `_validateIdentifiedAccount` staticcalls the identity registry.
 
 - **`isVerified(address)` is the only function ATS ever calls on the identity registry**, in one place.
@@ -123,7 +139,7 @@ Use USDC rather than HBAR for a mechanical reason: `closeRepo` is called by the 
 value attached**, so repurchase cash cannot arrive as `msg.value`. Allowance-and-pull works in both
 directions.
 
-## Solidity gotchas seen in this project
+## Solidity notes from this project
 
 - A file-level constant cannot carry NatSpec. `///` or `/**` above one gives
   `DocstringParsingError: Documentation tag @notice not valid for file-level variables`. Use `//`.

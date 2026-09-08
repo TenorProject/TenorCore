@@ -3,17 +3,21 @@ pragma solidity ^0.8.28;
 
 /// @title TenorIdentityRegistry
 /// @notice Minimal ERC-3643 identity registry for Hedera Asset Tokenization Studio.
+/// @dev ATS REQUIRES a registry to be wired: without one, every mint and transfer of the security
+///      reverts with IdentityRegistryCallFailed(). ATS does not ship an implementation, and its
+///      production credential path needs issuer infrastructure unavailable on testnet. This is the
+///      minimum that satisfies the interface for a testnet bond we issued ourselves.
 /// @dev ATS calls exactly one function on a registry: isVerified(address). Deploy with
-///      verifyEveryone = true to unblock development, then flip it off and whitelist the two
+///      testnetPermitAll = true to unblock development, then flip it off and whitelist the two
 ///      demo counterparties so the rejection beat comes from the registry itself.
 ///      Whitelist the LONG-ZERO address form the wallet presents, not an ECDSA alias.
 contract TenorIdentityRegistry {
     address public owner;
-    bool public verifyEveryone;
+    bool public testnetPermitAll;
     mapping(address => bool) public verified;
 
     event VerifiedSet(address indexed account, bool status);
-    event VerifyEveryoneSet(bool status);
+    event TestnetPermitAllSet(bool status);
     event OwnerChanged(address indexed newOwner);
 
     error NotOwner();
@@ -23,16 +27,16 @@ contract TenorIdentityRegistry {
         _;
     }
 
-    constructor(bool _verifyEveryone) {
+    constructor(bool _testnetPermitAll) {
         owner = msg.sender;
-        verifyEveryone = _verifyEveryone;
+        testnetPermitAll = _testnetPermitAll;
         emit OwnerChanged(msg.sender);
-        emit VerifyEveryoneSet(_verifyEveryone);
+        emit TestnetPermitAllSet(_testnetPermitAll);
     }
 
     /// @notice The only function ATS calls.
     function isVerified(address _userAddress) external view returns (bool) {
-        return verifyEveryone || verified[_userAddress];
+        return testnetPermitAll || verified[_userAddress];
     }
 
     function setVerified(address account, bool status) external onlyOwner {
@@ -47,9 +51,9 @@ contract TenorIdentityRegistry {
         }
     }
 
-    function setVerifyEveryone(bool status) external onlyOwner {
-        verifyEveryone = status;
-        emit VerifyEveryoneSet(status);
+    function setTestnetPermitAll(bool status) external onlyOwner {
+        testnetPermitAll = status;
+        emit TestnetPermitAllSet(status);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {

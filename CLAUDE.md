@@ -5,6 +5,12 @@ settles itself.** ETHGlobal ETHOnline 2026, Hedera "Tokenization of Anything" tr
 
 **Deadline: Sun 13 Sep 2026, 12:00 EDT / 19:00 Istanbul.**
 
+Open-source hackathon project, **Hedera testnet only**. The bond used throughout was issued by this
+team and this team holds the issuer roles on it. `src/periphery/` contains minimal implementations
+of the ERC-3643 identity registry and compliance module that ATS requires and does not ship; without
+both, every mint and transfer reverts. Their permissive testnet default is switched off and replaced
+with an explicit allowlist before the demo.
+
 ## The whole project in two functions
 
 `TenorSettlement.openRepo` — in one call: pull cash from the lender, execute the borrower's ATS

@@ -10,7 +10,7 @@ contract DeployPeriphery is Script {
     function run() external {
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
 
-        // verifyEveryone = true unblocks development. Flip to false and whitelist the two
+        // testnetPermitAll = true unblocks development. Flip to false and whitelist the two
         // demo counterparties before filming, so the rejection comes from the registry itself.
         TenorIdentityRegistry registry = new TenorIdentityRegistry(true);
         TenorCompliance compliance = new TenorCompliance();
