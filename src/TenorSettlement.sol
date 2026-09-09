@@ -171,6 +171,7 @@ contract TenorSettlement is EIP712 {
     event Funded(address indexed from, uint256 amount);
 
     error NotOwner();
+    error InternalOnly();
     error NotBorrower(address expected, address actual);
     error AlreadyExists(bytes32 id);
     error QuoteExpired(uint64 quoteExpiry);
@@ -360,36 +361,35 @@ contract TenorSettlement is EIP712 {
             return;
         }
 
-        // Cash leg: borrower -> lender. try/catch because `cash` is an HTS token behind the
-        // ERC-20 facade and we do not get to assume it behaves. Two distinct failure shapes are
-        // possible and both must be caught: a non-reverting `false` return, and a hard revert.
-        try IERC20(r.cash).transferFrom(r.borrower, r.lender, r.repurchase) returns (bool ok) {
-            if (!ok) { r.status = Status.Defaulted; emit RepoDefaulted(id, "cash leg returned false"); return; }
+        // Both legs in a single self-call so the EVM rolls back both if either fails.
+        // No partial settlement: cash cannot move without collateral following.
+        try this._executeSettlement(id) {
+            r.status = Status.Closed;
+            emit RepoClosed(id, r.repurchase, r.collateralQty);
+        } catch Error(string memory reason) {
+            r.status = Status.Defaulted;
+            emit RepoDefaulted(id, reason);
         } catch {
-            r.status = Status.Defaulted; emit RepoDefaulted(id, "cash leg reverted"); return;
+            r.status = Status.Defaulted;
+            emit RepoDefaulted(id, "settlement reverted");
         }
+    }
 
-        // Security leg: execute the return-leg hold created at open over the LENDER's balance,
-        // sending the collateral back to the borrower. We are the escrow on that hold, which is
-        // why we can move it and the lender could not move it away during the term.
-        try IHoldByPartition(r.security).executeHoldByPartition(
+    /// @dev Internal sub-call from closeRepo; atomic leg settlement, preserves closeRepo state.
+    function _executeSettlement(bytes32 id) external {
+        if (msg.sender != address(this)) revert InternalOnly();
+        Repo storage r = repos[id];
+
+        bool ok = IERC20(r.cash).transferFrom(r.borrower, r.lender, r.repurchase);
+        if (!ok) revert CashLegFailed();
+
+        IHoldByPartition(r.security).executeHoldByPartition(
             IHoldByPartition.HoldIdentifier({
                 partition: r.partition, tokenHolder: r.lender, holdId: r.closeHoldId
             }),
             r.borrower,
             r.collateralQty
-        ) returns (bool, bytes32) {
-            r.status = Status.Closed;
-            emit RepoClosed(id, r.repurchase, r.collateralQty);
-        } catch {
-            // Worst case and the one to watch: cash moved but collateral did not, so the
-            // borrower has paid and the lender still holds the security. We cannot revert to
-            // undo the cash leg without losing the whole settlement, so we record it loudly and
-            // let it be resolved out of band. In practice this only happens if the hold expired
-            // (it cannot: expiry is maturity + HOLD_BUFFER) or the token was paused mid-term.
-            r.status = Status.Defaulted;
-            emit RepoDefaulted(id, "collateral leg reverted after cash settled");
-        }
+        );
     }
 
     /// @notice Repurchase before maturity and take the collateral back early.
