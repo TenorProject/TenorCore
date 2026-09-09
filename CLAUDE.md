@@ -13,9 +13,10 @@ with an explicit allowlist before the demo.
 
 ## The whole project in two functions
 
-`TenorSettlement.openRepo` — in one call: pull cash from the lender, execute the borrower's ATS
-hold so collateral lands with the lender, create the return-leg hold, and schedule `closeRepo`
-through HIP-1215 at maturity.
+`TenorSettlement.openRepo(Quote, signature)` — the borrower accepts a lender's EIP-712 signed
+quote, and in one call: pull cash from the lender, create and execute the borrower's ATS hold so
+collateral lands with the lender, create the return-leg hold, and schedule `closeRepo` through
+HIP-1215 at maturity.
 
 `TenorSettlement.closeRepo` — called by the **network** at maturity with nobody online. Never
 reverts. Two terminal branches: borrower repurchases, or lender keeps the collateral.
@@ -53,6 +54,9 @@ hold has never run. That is the highest-risk unknown.
   testing is `forge script --rpc-url hedera_testnet --broadcast` only.
 - **HCS is unreachable from Solidity** (no precompile; HIP-1208 is an open PR). The audit trail is
   an off-chain service in `services/hcs/` driven by contract events. So emit richly.
+- **Rate agreement is RFQ**: lenders sign EIP-712 quotes off-chain, the borrower executes one.
+  Not an order book, not a matching engine. Repo against a specific security is a specials trade.
+  Lender approves once then quotes for free; borrower opens in one transaction. No `permit` on HTS.
 - Cash leg is **USDC**, an HTS token, not HBAR. `closeRepo` is called by the network with no value
   attached, so repurchase cash cannot arrive as `msg.value`. Allowance-and-pull works both ways.
 - `address(this).balance` is **tinybars** (8 dp); `msg.value` is **weibar** (18 dp).

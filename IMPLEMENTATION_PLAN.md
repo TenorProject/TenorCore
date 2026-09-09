@@ -10,9 +10,9 @@ Read `ethonline-2026/tenor-handoff.md` for the full context. This file is the bu
 
 One contract, plus scripts, one small off-chain service, and a thin UI.
 
-`openRepo` — in a **single call**: pull cash from the lender, execute the borrower's ATS hold so
-collateral lands with the lender, create the return-leg hold, and schedule `closeRepo` via HIP-1215
-at maturity.
+`openRepo(Quote, signature)` — the borrower accepts a lender's EIP-712 signed quote, and in a
+**single call**: pull cash from the lender, create and execute the borrower's ATS hold so collateral
+lands with the lender, create the return-leg hold, and schedule `closeRepo` via HIP-1215 at maturity.
 
 `closeRepo` — called by the **network** at maturity. Never reverts. Two terminal branches:
 borrower repurchases, or lender keeps the collateral.
@@ -98,9 +98,9 @@ src/
   probe/
     ScheduleProbe.sol              # HIP-1215 evidence, keep it in the repo
   mocks/
-    MockScheduleService.sol        # for forge test
-    MockHold.sol
-    MockERC20.sol
+    MockATS.sol                    # hold surface: total = available + held
+    MockERC20.sol                  # stands in for USDC
+                                   # 0x16b is handled with vm.mockCall, not a mock contract
 script/
   01_DeployPeriphery.s.sol
   02_WireBond.s.sol                # setIdentityRegistry + setCompliance on the ATS bond
@@ -140,20 +140,43 @@ struct Repo {
 }
 ```
 
+### Rate agreement: RFQ, not an order book
+
+Repo against a *specific* security is a **specials** trade. General collateral repo has an order
+book because the collateral is fungible; specials are negotiated, which is why Tradeweb and
+BrokerTec run RFQ for them. So: the borrower publishes a request, lenders return signed quotes, the
+borrower executes the one they accept. We are not competing on price formation.
+
+Nothing is negotiated on-chain and nothing can be substituted, because the terms are bound by the
+lender's signature. The lender signs a 12-field `Quote` (EIP-712, domain `Tenor` v1); the borrower
+calls `openRepo` and the contract recovers the signer and requires it to equal `q.lender`.
+
+| | Setup, once | Per trade |
+|---|---|---|
+| Lender | `approve(cash, TenorSettlement, working amount)` | sign a Quote, **zero transactions** |
+| Borrower | authorise TenorSettlement as an ATS operator | `openRepo`, **one transaction** |
+
+There is no EIP-2612 `permit` on HTS (HIP-376 gives approve/allowance/transferFrom only), so the
+lender's one-time approval cannot be removed. Advise a working amount rather than infinite: the
+allowance is standing, bounded only by `quoteExpiry` and the fact that each `requestId` opens once.
+
 ### openRepo
 
-1. Validate: status is `None`, maturity in the future, contract holds enough HBAR to pay for the
-   scheduled unwind.
-2. **Assert hold expiry outlives schedule expiry.** After an ATS hold expires *anyone* can
-   permissionlessly reclaim, which would make the unwind revert.
+1. `msg.sender == q.borrower`; `requestId` unused; quote not expired; quote not cancelled;
+   maturity in the future; contract holds enough HBAR to pay for the scheduled unwind.
+2. Recover the EIP-712 signer and require it to equal `q.lender`.
 3. `IERC20(cash).transferFrom(lender, borrower, principal)`.
-4. `executeHoldByPartition(openHoldId, lender, collateralQty)`.
-5. `operatorCreateHoldByPartition(...)` over the lender's new balance, escrow = this contract,
-   expiry > maturity. Lender must have authorised us as an ATS operator beforehand.
+4. `createHoldFromByPartition(partition, borrower, hold, "")` then `executeHoldByPartition(..., lender, qty)`.
+   The contract creates the hold itself, so **hold expiry is set here** (`maturity + HOLD_BUFFER`)
+   rather than asserted. That removes a whole class of failure.
+5. `createHoldFromByPartition(partition, lender, hold, "")` for the return leg. This is what locks
+   the collateral for the term: the lender cannot move it away and leave nothing to give back.
 6. `hasScheduleCapacity(maturity, GAS)`; if false, **step the expiry forward**, do not revert the trade.
 7. `scheduleCall(address(this), maturity, GAS, 0, abi.encodeWithSelector(this.closeRepo.selector, id))`.
-8. Store `scheduleAddress`, set `Open`, **emit a rich event**. The HCS service listens for it and
-   writes the audit trail; the contract cannot do that itself.
+8. Store, set `Open`, **emit a rich event**. The HCS service listens for it; the contract cannot
+   write to HCS itself.
+
+Reverting anywhere in `openRepo` is correct and safe: nothing has moved yet.
 
 ### closeRepo
 
@@ -202,7 +225,9 @@ record without re-reading chain state.
 
 ## 5. Decisions already made, do not relitigate
 
-- **Foundry.** Settled above.
+- **Foundry.** Settled above. OpenZeppelin added for `EIP712` and `ECDSA`; `remappings.txt` committed.
+- **RFQ with EIP-712 signed quotes**, not an order book and not a matching engine. Two other teams
+  in this track are competing on price formation; we are not. See above.
 - **Cash leg is USDC** (HTS token, native Circle issuance on Hedera), not HBAR. Mechanical reason,
   not narrative: `closeRepo` is called by the network with no value attached, so the repurchase cash
   cannot arrive as `msg.value`. Allowance-and-pull works in both directions.
@@ -224,12 +249,12 @@ record without re-reading chain state.
 
 | Day | Deliverable | Owner |
 |---|---|---|
-| **Mon 8** | foundry.toml, Counter deleted, interfaces written and **verified against the deployed ATS ABI**. `openRepo` compiling. Disclosure in the first README commit. | Mahdiye (contract), Parsa (interfaces + scripts) |
-| **Tue 9** | One repo opens on testnet: both legs cross in one transaction. Unwind scheduled and visible on HashScan. **Run the `ScheduleProbe` revert experiment.** HCS service skeleton: topic created, one message written. | Mahdiye, Mhd (probe), Parsa (HCS) |
-| **Wed 10** | Unwind fires at maturity end to end. Both branches tested. Non-verified counterparty rejection working. HCS service consuming real events. | All |
-| **Thu 11** | Margin call, thin UI, contracts verified on HashScan via Sourcify. **Feature freeze at end of day.** | Parsa (app), Mahdiye (contract), Mhd (review) |
-| **Fri 12** | Two full rehearsals from a script, then video, README, submit. **Submit tonight, not Saturday.** | Mhd (video), all |
-| Sat 13 | Buffer only. Deadline 19:00 Istanbul. | — |
+| ~~Mon 8~~ | *done:* toolchain, interfaces verified against the live ABI, periphery, probe, RFQ settlement contract, mocks, unit tests | — |
+| **Wed 9** | `forge build` and `forge test` green. One repo opens **on testnet**: both legs cross in one transaction. Unwind scheduled, visible on HashScan. **Run the `ScheduleProbe` revert experiment.** | Mahdiye (contract), Mhd (probe) |
+| **Thu 10** | Unwind fires at maturity end to end. Both close branches confirmed on testnet. Non-verified counterparty rejection working. HCS service consuming real events. | All |
+| **Fri 11** | Margin call, thin UI, contracts verified on HashScan via Sourcify. **Feature freeze at end of day.** | Parsa (app), Mahdiye (contract), Mhd (review) |
+| **Sat 12** | Two full rehearsals from a script, then video, README, submit. **Submit tonight, not Sunday.** | Mhd (video), all |
+| Sun 13 | Buffer only. Deadline 19:00 Istanbul. | — |
 
 **On the 10th, choosing between one more feature and a rehearsed video: choose the video.**
 Async judging screens to roughly the top 20% before a human speaks to us, and it screens on the tape.

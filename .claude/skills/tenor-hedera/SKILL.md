@@ -98,6 +98,16 @@ struct Hold { uint256 amount; uint256 expirationTimestamp; address escrow; addre
 - Expiration is mandatory. **After expiry anyone can permissionlessly reclaim to the holder.**
   Always assert hold expiry outlives any schedule that depends on it.
 
+**Hold function names, verified against the live diamond** (the earlier guesses were wrong):
+`createHoldFromByPartition(bytes32 partition, address from, Hold hold, bytes operatorData)` is the
+operator-side creator. There is no `operatorCreateHoldByPartition`. And
+`executeHoldByPartition(HoldIdentifier, address to, uint256 amount)` returns
+`(bool success_, bytes32 partition_)`, not a bare bool.
+
+**No EIP-2612 `permit` on HTS tokens.** HIP-376 gives `approve`, `allowance` and `transferFrom`
+through the ERC-20 facade and nothing more. The facade is network-provided, so you cannot add
+`permit`. Any signature-based flow still needs one on-chain approval per spender.
+
 **Clearing is a global mutually-exclusive mode (a configuration constraint).** While active, normal transfers, redeems, hold
 creation *and maturity redemption* all revert. Do not enable it.
 
