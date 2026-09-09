@@ -171,6 +171,47 @@ contract TenorSettlementTest is Test {
         settlement.closeRepo(REQ); // must not revert even though the security leg fails
     }
 
+    // ---- early repayment ----------------------------------------------------------------
+
+    function test_repayEarly_returnsCollateralBeforeMaturity() public {
+        _open();
+        vm.startPrank(borrower);
+        usdc.approve(address(settlement), REPURCHASE);
+        settlement.repayEarly(REQ);
+        vm.stopPrank();
+
+        assertEq(ats.available(borrower), QTY, "collateral back before maturity");
+        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender paid in full, no rebate");
+    }
+
+    function test_repayEarly_onlyBorrower() public {
+        _open();
+        vm.prank(lender);
+        vm.expectRevert();
+        settlement.repayEarly(REQ);
+    }
+
+    function test_repayEarly_revertsWhenUnfunded() public {
+        _open();
+        vm.prank(borrower);
+        vm.expectRevert(); // no allowance: caller-initiated, so it must revert, not default
+        settlement.repayEarly(REQ);
+    }
+
+    function test_scheduledCloseIsNoOpAfterEarlyRepayment() public {
+        _open();
+        vm.startPrank(borrower);
+        usdc.approve(address(settlement), REPURCHASE);
+        settlement.repayEarly(REQ);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 7 days);
+        settlement.closeRepo(REQ); // the schedule still fires; must be a quiet no-op
+
+        assertEq(ats.available(borrower), QTY, "nothing moved twice");
+        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender not paid twice");
+    }
+
     function test_close_isIdempotent() public {
         _open();
         vm.prank(borrower);

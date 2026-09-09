@@ -18,6 +18,14 @@ Tenor hands the closing leg to the network at the moment the trade is struck.
 - **Open** crosses collateral against USDC in a single contract call. Both legs move or neither does.
 - **The unwind** is created at open as a HIP-1215 scheduled contract call and executed by the Hedera
   network itself at maturity. Measured drift on testnet: **134 ms** (schedule `0.0.10393574`).
+- **No price oracle, and no margin call.** The haircut agreed at open is the risk control. The
+  trade is over-collateralised from the start, it is short-dated, and if the borrower fails to
+  repurchase the lender simply keeps collateral they already hold. That is how bilateral term repo
+  works, and it means there is no feed to manipulate and nothing to liquidate mid-term. Nothing
+  prices a bond issued last week anyway; pretending otherwise would be the weaker design.
+- **The borrower can repurchase early** at the full agreed amount, with no rebate. The lender
+  receives exactly the return they signed for, sooner, so it needs no consent from them. The
+  pending scheduled settlement then fires at maturity, sees a closed repo, and does nothing.
 - **Compliance is enforced by the token.** The collateral is an ERC-3643 / ERC-1400 security issued
   through Hedera's Asset Tokenization Studio. A counterparty who is not in the identity registry
   cannot take delivery, because the transfer itself reverts.

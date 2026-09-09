@@ -57,6 +57,8 @@ hold has never run. That is the highest-risk unknown.
 - **Rate agreement is RFQ**: lenders sign EIP-712 quotes off-chain, the borrower executes one.
   Not an order book, not a matching engine. Repo against a specific security is a specials trade.
   Lender approves once then quotes for free; borrower opens in one transaction. No `permit` on HTS.
+- **No price oracle, no margin call.** The haircut at open is the risk control. Deliberate, and
+  stated in the README. Do not add one back without adding a remedy to go with it.
 - Cash leg is **USDC**, an HTS token, not HBAR. `closeRepo` is called by the network with no value
   attached, so repurchase cash cannot arrive as `msg.value`. Allowance-and-pull works both ways.
 - `address(this).balance` is **tinybars** (8 dp); `msg.value` is **weibar** (18 dp).
@@ -68,6 +70,7 @@ hold has never run. That is the highest-risk unknown.
 - Re-read ATS from scratch. The findings are in the skill file.
 - Build a rates engine. The repo rate is a trade input.
 - Build a separate liquidation engine. It is the default branch of `closeRepo`.
+- Add a price feed or margin call. It was removed on purpose; see the README.
 - Add an order book, matching engine, prediction market, or futures.
 - Raise the scheduled gas limit above 200_000. 2_000_000 fails `hasScheduleCapacity`.
 

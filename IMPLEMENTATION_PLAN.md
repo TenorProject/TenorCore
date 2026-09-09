@@ -237,10 +237,14 @@ record without re-reading chain state.
 - **Repo rate is a trade input**, not a mechanism. Compute `repurchase` off-chain and pass it in.
   No rates engine. It is a different rate from the bond's coupon.
 - **Liquidation is the default branch of `closeRepo`.** No separate engine.
-- **Margin call** is nice to have, one rubric point: mark, compare against `haircutBps`, emit and
-  let the HCS service record it. Nothing more.
-- **No oracle prices our bond.** It was minted this week. The mark is an admin-set NAV or a proxy
-  feed against a real asset, and we say which in the README.
+- **No oracle and no margin call.** Removed deliberately, not skipped. A margin call is only
+  meaningful if there is a remedy, and there is none here: collateral is fixed at open and locked
+  in a hold, there is no way to post more and no early liquidation. The haircut is the risk
+  control, which is how bilateral term repo actually works. An admin-typed "mark" with an advisory
+  event was theatre and a judge would have found the hole in one question. Stated as a design
+  position in the README.
+- **Early repayment** at the full repurchase amount, no rebate, no lender consent needed. Safe
+  because the lender is strictly better off. The orphaned schedule is a quiet no-op.
 - Not building: order book, matching engine, prediction market, futures, rehypothecation.
 
 ---
@@ -252,7 +256,7 @@ record without re-reading chain state.
 | ~~Mon 8~~ | *done:* toolchain, interfaces verified against the live ABI, periphery, probe, RFQ settlement contract, mocks, unit tests | — |
 | **Wed 9** | `forge build` and `forge test` green. One repo opens **on testnet**: both legs cross in one transaction. Unwind scheduled, visible on HashScan. **Run the `ScheduleProbe` revert experiment.** | Mahdiye (contract), Mhd (probe) |
 | **Thu 10** | Unwind fires at maturity end to end. Both close branches confirmed on testnet. Non-verified counterparty rejection working. HCS service consuming real events. | All |
-| **Fri 11** | Margin call, thin UI, contracts verified on HashScan via Sourcify. **Feature freeze at end of day.** | Parsa (app), Mahdiye (contract), Mhd (review) |
+| **Fri 11** | Thin UI, contracts verified on HashScan via Sourcify. **Feature freeze at end of day.** | Parsa (app), Mahdiye (contract), Mhd (review) |
 | **Sat 12** | Two full rehearsals from a script, then video, README, submit. **Submit tonight, not Sunday.** | Mhd (video), all |
 | Sun 13 | Buffer only. Deadline 19:00 Istanbul. | — |
 
