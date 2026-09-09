@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {TenorSettlement} from "../src/TenorSettlement.sol";
 import {MockATS} from "../src/mocks/MockATS.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";

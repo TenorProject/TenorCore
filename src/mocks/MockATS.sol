@@ -34,7 +34,7 @@ contract MockATS is IHoldByPartition {
         available[from] -= h.amount;
         held[from] += h.amount;
         uint256 id = nextHoldId++;
-        holds[id] = StoredHold(from, h.escrow, h.amount, h.expirationTimestamp, true);
+        holds[id] = StoredHold({ holder: from, escrow: h.escrow, amount: h.amount, expiry: h.expirationTimestamp, live: true });
         return (true, id);
     }
 

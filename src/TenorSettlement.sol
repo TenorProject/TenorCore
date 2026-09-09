@@ -183,7 +183,14 @@ contract TenorSettlement is EIP712 {
     error CashLegFailed();
     error NotOpen(bytes32 id);
 
-    modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
+    modifier onlyOwner() {
+        _onlyOwner();
+        _;
+    }
+
+    function _onlyOwner() internal view {
+        if (msg.sender != owner) revert NotOwner();
+    }
 
     constructor() payable EIP712("Tenor", "1") { owner = msg.sender; }
 

@@ -49,8 +49,12 @@ contract ScheduleProbe {
     error DeliberateRevert();
 
     modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
+        _onlyOwner();
         _;
+    }
+
+    function _onlyOwner() internal view {
+        if (msg.sender != owner) revert NotOwner();
     }
 
     constructor() payable {
