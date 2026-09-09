@@ -13,7 +13,20 @@ Watch `TenorSettlement` events and write each one to an HCS topic, so the full t
 consensus timestamps the network assigned rather than ones we assigned, and anyone can replay it
 from a public mirror node with no indexer and no permission.
 
-Events to consume: `RepoOpened`, `RepoClosed`, `RepoDefaulted`, `MarginCall`, `ScheduleStepped`.
+Events to consume, exactly as declared in `src/TenorSettlement.sol`:
+
+| Event | Meaning for the audit trail |
+|---|---|
+| `RepoOpened` | the trade struck: both legs crossed, unwind scheduled |
+| `RepoClosed` | borrower repurchased, collateral returned |
+| `RepoDefaulted` | borrower did not repurchase, lender kept the collateral. Carries a `reason` string |
+| `RepoRepaidEarly` | closed before maturity; the schedule that later fires is a no-op |
+| `ScheduleStepped` | the requested maturity second was saturated and the unwind moved forward |
+| `QuoteCancelled` | a lender withdrew an outstanding quote |
+| `Funded` | HBAR arrived to pay for scheduled executions |
+
+There is no `MarginCall` event. It was removed on purpose along with the oracle; see the README.
+Do not write a consumer for it.
 
 ## Build notes
 
@@ -24,4 +37,10 @@ Events to consume: `RepoOpened`, `RepoClosed`, `RepoDefaulted`, `MarginCall`, `S
 - Optional and cheap: a HIP-991 fee on the topic makes submission cost money at the protocol layer.
   Only if there is time.
 
-Owner: Parsa. Skeleton due Tue 9, consuming real events Wed 10.
+## Status
+
+**Not started.** Owner: Parsa. This is the last unbuilt deliverable and it is not on the critical
+path: the settlement contract and the testnet demo come first. If time runs out, a UI reading the
+mirror node directly still tells the story; a missing HCS trail costs less than a missing unwind.
+
+See `STATUS.md` for what is proven and what is next.

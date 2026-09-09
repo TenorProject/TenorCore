@@ -15,7 +15,7 @@ verified against the published open-source contracts at v8.0.0 or measured on pu
 two interfaces ATS **requires**: an ERC-3643 identity registry and compliance module. Without both,
 every mint and transfer of an ATS security reverts. ATS ships neither, and its production
 credential path depends on issuer infrastructure that is not available for a testnet demo. Their
-permissive `testnetPermitAll` flag is a development default for a token we issued ourselves; it is
+permissive `permitAllForTestnet` flag is a development default for a token we issued ourselves; it is
 switched off and replaced with an explicit two-address allowlist before the demo, so that the
 compliance rejection is a real one.
 
