@@ -11,12 +11,12 @@ pragma solidity ^0.8.28;
 ///      on-chain trace for the demo.
 contract TenorCompliance {
     address public owner;
-    bool public testnetPermitAll = true;
+    bool public permitAllForTestnet = true;
 
     event TransferRecorded(address indexed from, address indexed to, uint256 amount);
     event CreatedRecorded(address indexed to, uint256 amount);
     event DestroyedRecorded(address indexed from, uint256 amount);
-    event TestnetPermitAllSet(bool status);
+    event PermitAllForTestnetSet(bool status);
 
     error NotOwner();
 
@@ -30,7 +30,7 @@ contract TenorCompliance {
     }
 
     function canTransfer(address, address, uint256) external view returns (bool) {
-        return testnetPermitAll;
+        return permitAllForTestnet;
     }
 
     function transferred(address _from, address _to, uint256 _amount) external {
@@ -45,8 +45,8 @@ contract TenorCompliance {
         emit DestroyedRecorded(_from, _amount);
     }
 
-    function setTestnetPermitAll(bool status) external onlyOwner {
-        testnetPermitAll = status;
-        emit TestnetPermitAllSet(status);
+    function setPermitAllForTestnet(bool status) external onlyOwner {
+        permitAllForTestnet = status;
+        emit PermitAllForTestnetSet(status);
     }
 }

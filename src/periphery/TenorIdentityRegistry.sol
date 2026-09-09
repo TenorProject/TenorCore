@@ -8,16 +8,16 @@ pragma solidity ^0.8.28;
 ///      production credential path needs issuer infrastructure unavailable on testnet. This is the
 ///      minimum that satisfies the interface for a testnet bond we issued ourselves.
 /// @dev ATS calls exactly one function on a registry: isVerified(address). Deploy with
-///      testnetPermitAll = true to unblock development, then flip it off and whitelist the two
+///      permitAllForTestnet = true to unblock development, then flip it off and whitelist the two
 ///      demo counterparties so the rejection beat comes from the registry itself.
 ///      Whitelist the LONG-ZERO address form the wallet presents, not an ECDSA alias.
 contract TenorIdentityRegistry {
     address public owner;
-    bool public testnetPermitAll;
+    bool public permitAllForTestnet;
     mapping(address => bool) public verified;
 
     event VerifiedSet(address indexed account, bool status);
-    event TestnetPermitAllSet(bool status);
+    event PermitAllForTestnetSet(bool status);
     event OwnerChanged(address indexed newOwner);
 
     error NotOwner();
@@ -27,16 +27,16 @@ contract TenorIdentityRegistry {
         _;
     }
 
-    constructor(bool _testnetPermitAll) {
+    constructor(bool _permitAllForTestnet) {
         owner = msg.sender;
-        testnetPermitAll = _testnetPermitAll;
+        permitAllForTestnet = _permitAllForTestnet;
         emit OwnerChanged(msg.sender);
-        emit TestnetPermitAllSet(_testnetPermitAll);
+        emit PermitAllForTestnetSet(_permitAllForTestnet);
     }
 
     /// @notice The only function ATS calls.
     function isVerified(address _userAddress) external view returns (bool) {
-        return testnetPermitAll || verified[_userAddress];
+        return permitAllForTestnet || verified[_userAddress];
     }
 
     function setVerified(address account, bool status) external onlyOwner {
@@ -51,9 +51,9 @@ contract TenorIdentityRegistry {
         }
     }
 
-    function setTestnetPermitAll(bool status) external onlyOwner {
-        testnetPermitAll = status;
-        emit TestnetPermitAllSet(status);
+    function setPermitAllForTestnet(bool status) external onlyOwner {
+        permitAllForTestnet = status;
+        emit PermitAllForTestnetSet(status);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
