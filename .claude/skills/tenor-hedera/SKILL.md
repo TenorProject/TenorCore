@@ -64,11 +64,31 @@ function hasScheduleCapacity(uint256 expirySecond, uint256 gasLimit) external vi
 - A scheduled transaction **fires once and never retries**. A revert is a settlement that silently
   did not happen.
 
+## Gas floor on scheduleCall, and the 63/64 rule
+
+`scheduleCall` **reverts with empty returndata when starved of gas**. The HIP's "never reverts"
+covers business failures, not gas starvation, so a failure here gives you no reason string at all.
+
+Another team measured the floor for the precompile itself at **1,445,312 to 1,468,750 gas**,
+independent of the gas requested for the *scheduled* call. Our own `ScheduleProbe.arm()` used
+**1,511,069** total, which is consistent with that floor plus a little overhead, so treat the number
+as credible.
+
+EIP-150's 63/64 rule matters here: an outer limit of 1.5M hands the precompile only ~1.457M, which
+is inside the failure band. Any transaction that calls `scheduleCall` and also does other work
+(`openRepo` does a cash transfer, two hold creations and a hold execution) needs a **generous outer
+gas limit, 3,000,000 or more**. Hedera's per-transaction ceiling is 15M, so there is room.
+
 ## Units: a ten-order-of-magnitude mismatch
 
-- `address(this).balance` returns **tinybars** (8 decimals). 20 HBAR reads as `2000000000`.
+- `address(this).balance` returns **tinybars** (8 decimals). 20 HBAR reads as `2000000000`. We
+  measured this directly.
 - `msg.value` on a payable call arrives in **weibar** (18 decimals).
-- Mixing them produces bugs that look like permission errors.
+- `eth_getBalance` over JSON-RPC also reports **weibars**, so a script reading a balance and the
+  contract reading its own balance disagree by 1e10. Reported by another team; consistent with ours.
+- `address(this).balance >= 5 ether` can therefore never be true in a Hedera contract. The
+  dangerous mirror image is a threshold set too LOW, which passes trivially and leaves an
+  underfunded contract whose scheduled call silently never fires.
 
 ## Address forms
 
@@ -168,3 +188,35 @@ proven schedule 0.0.10393574
 
 HashScan uses Sourcify and Hedera runs its own instance:
 `forge verify-contract --verifier sourcify`. Verifying contracts is a stated prize requirement.
+
+
+## Reported by other teams, not independently verified
+
+Credible and consistent with what we have measured, but we have not reproduced these ourselves.
+Verify before relying on any of them.
+
+**A HAPI `CryptoTransfer` credits a contract's balance without running its code.** An EVM transfer
+to the same contract runs `receive()`; a HAPI-level transfer does not, and still reports SUCCESS.
+Consequence for us: our `Funded` event will not fire if someone tops the contract up from a wallet
+rather than through the EVM. Do not use that event to track the HBAR float; read the balance.
+
+**A rejected `deleteSchedule` is a silent no-op.** Transaction status comes back SUCCESS and the
+refusal exists only in the returned `int64`. This is the same pattern as every Hedera system
+contract, and it is why we check `rc != HEDERA_SUCCESS` after `scheduleCall`. If we ever add
+`deleteSchedule` on early repayment, it must check the return code too. Reportedly Hedera's own
+payments-scheduler template discards it.
+
+**Schedule delete authorisation.** The schedule's `admin_key` is the *creating contract's*
+ContractID. An unrelated EOA, an unrelated contract, and even the deploying EOA of the owning
+contract all get `INVALID_SIGNATURE`. If true this is a useful property: only the contract that
+created a schedule can cancel it.
+
+**`hasScheduleCapacity(now + 1)` returns false** despite the HIP stating a one-second minimum, and
+`false` conflates "this second is saturated" with "this expiry is invalid". Our `_scheduleUnwind`
+loop treats false as retryable and steps forward, which is safe but would waste all ten iterations
+on a permanently invalid expiry before reverting `NoScheduleCapacity`.
+
+**x402 on Hedera cannot settle into a contract call.** `@x402/hedera` builds only a
+`TransferTransaction`, and the facilitator rejects anything else with
+`invalid_exact_hedera_payload_contains_non_transfer_ops`. Not relevant to Tenor, which does not use
+x402, but it rules out escrow-on-receipt for anything on that rail.

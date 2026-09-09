@@ -11,7 +11,7 @@ import {MockERC20} from "../src/mocks/MockERC20.sol";
  * inspect the chain between them:
  *
  *   forge script script/TestnetFlow.s.sol --sig "deployAll()"  --rpc-url hedera_testnet --broadcast
- *   forge script script/TestnetFlow.s.sol --sig "openRepo()"   --rpc-url hedera_testnet --broadcast
+ *   forge script script/TestnetFlow.s.sol --sig "openRepo()"   --rpc-url hedera_testnet --broadcast --gas-limit 4000000
  *   forge script script/TestnetFlow.s.sol --sig "status()"     --rpc-url hedera_testnet
  *   forge script script/TestnetFlow.s.sol --sig "closeRepo()"  --rpc-url hedera_testnet --broadcast
  *   forge script script/TestnetFlow.s.sol --sig "repayEarly()" --rpc-url hedera_testnet --broadcast
@@ -87,6 +87,14 @@ contract TestnetFlow is Script {
     }
 
     /// Step 2. Lender signs off-chain, borrower executes. ONE transaction on chain.
+    ///
+    /// RUN THIS WITH --gas-limit 4000000. scheduleCall on 0x16b reverts with EMPTY returndata when
+    /// starved of gas; the floor for the precompile alone is around 1.45M. openRepo does a cash
+    /// transfer, two hold creations and a hold execution before it reaches scheduleCall, and
+    /// EIP-150 forwards only 63/64 of what is left, so a limit that looks generous can still land
+    /// under the floor. An empty revert here is gas, not logic. If --gas-limit is ignored, use
+    /// --gas-estimate-multiplier 300 instead; hashio's eth_estimateGas does not model system
+    /// contract calls well.
     function openRepo() external {
         TenorSettlement settlement = TenorSettlement(payable(vm.envAddress("TENOR_SETTLEMENT")));
         TenorSettlement.Quote memory q = _quote();

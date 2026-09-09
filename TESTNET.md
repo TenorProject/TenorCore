@@ -68,10 +68,31 @@ the last day.
 
 ```bash
 forge script script/TestnetFlow.s.sol --sig "openRepo()" \
-  --rpc-url hedera_testnet --broadcast
+  --rpc-url hedera_testnet --broadcast --gas-limit 4000000
 ```
 
 The lender signs off-chain and sends nothing. The borrower sends **one** transaction.
+
+**Set the outer gas limit high, and do not trust the estimate.** This is the single most likely
+way stage 1 fails on the first attempt. `scheduleCall` on `0x16b` reverts with *empty returndata*
+when it is starved of gas; the HIP's promise that it never reverts covers business failures, not
+gas starvation. Another team measured the floor for the precompile alone at roughly **1,445,000 to
+1,469,000** gas, and our own `ScheduleProbe.arm()` burned 1,511,069 in total, which is consistent
+with that floor plus a little overhead.
+
+`openRepo` is far heavier than `arm()`: a cash `transferFrom`, two hold creations and a hold
+execution all run *before* `scheduleCall`. Worse, EIP-150's 63/64 rule means the precompile only
+ever receives 63/64 of the gas remaining at that point, so an outer limit that looks generous can
+still hand the precompile less than its floor. A 1.5M outer limit forwards about 1.457M, which is
+inside the failure band. 4,000,000 leaves real headroom.
+
+If `--gas-limit` does not take, use `--gas-estimate-multiplier 300` instead: hashio's
+`eth_estimateGas` does not model system contract calls well, so the default 130% multiplier is
+applied to an estimate that was already wrong.
+
+Note this is a *different* number from `SCHEDULE_GAS` (200,000), which is the budget the network
+gets for executing `closeRepo` later. That one must stay small, because `hasScheduleCapacity`
+refuses large per-second reservations.
 
 **Then open that transaction on HashScan and check the thing that matters:** the cash transfer and
 both hold operations appear in the *same* transaction record. That is the atomic cross, and it is
@@ -114,6 +135,10 @@ record the drift. `ScheduleProbe` measured **134 ms**.
 
 `closeRepo()` is exposed as a manual entrypoint so you can exercise the logic without waiting for
 maturity. Use it while iterating, but the **demo must be the unattended run**.
+
+**A revert with no selector and no returndata at all is a gas problem, not a logic bug.** That
+is what `scheduleCall` does when starved, and it is indistinguishable from a plain out-of-gas at
+the call site. Raise `--gas-limit` before you start decoding anything.
 
 If a transaction reverts with only a selector, decode it against the errors in
 `TenorSettlement.sol`, or read the failure from the mirror node:
