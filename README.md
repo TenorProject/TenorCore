@@ -72,6 +72,9 @@ This approach was confirmed with ETHGlobal support before the build began.
 | `src/periphery/` | Minimal identity registry and compliance module ATS does not ship. |
 | `src/probe/ScheduleProbe.sol` | HIP-1215 evidence rig. Rerunnable. |
 | `services/hcs/` | Consensus-service audit trail. HCS is unreachable from Solidity. |
+| `test/TenorSettlement.t.sol` | Test suite, written to double as the testnet runbook. |
+| `script/TestnetFlow.s.sol` | Step-by-step testnet walkthrough, one entrypoint per step. |
+| `TESTNET.md` | How to deploy and test on Hedera testnet. |
 | `IMPLEMENTATION_PLAN.md` | Build plan. |
 | `TOOLING.md` | Dev setup. |
 
@@ -80,8 +83,12 @@ This approach was confirmed with ETHGlobal support before the build began.
 ```bash
 forge build
 forge test
-forge script script/01_DeployPeriphery.s.sol --rpc-url hedera_testnet --broadcast
 ```
+
+Testnet deployment and the full walkthrough are in **[TESTNET.md](TESTNET.md)**. It runs in two
+stages on purpose: stage 1 uses mock securities and mock cash so the only unknown is HIP-1215
+scheduling, and stage 2 swaps in the real ATS bond. `forge test` cannot reach `0x16b` or `0x167`,
+so neither is proven by a green unit suite.
 
 ## AI assistance
 

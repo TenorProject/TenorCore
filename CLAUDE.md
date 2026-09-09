@@ -30,6 +30,8 @@ Everything else in this repo is supporting cast.
   places we hit. Verify against Solidity or testnet, never against docs.**
 - **`IMPLEMENTATION_PLAN.md`** — build plan, file layout, day-by-day schedule.
 - **`TOOLING.md`** — MCP servers and Hedera plugins, and the two per-developer setup steps.
+- **`TESTNET.md`** — deploy and test on testnet, in two stages. Stage 1 mocks the securities layer
+  so the only unknown is scheduling; stage 2 swaps in the real ATS bond.
 
 ## State
 
@@ -51,7 +53,11 @@ hold has never run. That is the highest-risk unknown.
 
 - Foundry. `solc 0.8.28`, `evm_version = cancun`, optimizer 100 runs, matching ATS's own config.
 - `forge test` **cannot reach `0x16b` or `0x167`**. Local tests need mocks and prove little. Real
-  testing is `forge script --rpc-url hedera_testnet --broadcast` only.
+  testing is `forge script --rpc-url hedera_testnet --broadcast` only, via `script/TestnetFlow.s.sol`.
+- **`vm.prank` and `vm.expectRevert` apply to the next EXTERNAL call.** `_sign()` calls
+  `hashQuote()`, so always hoist the signature into a local before a cheatcode. This cost an hour.
+- Public getters starting with `test` are collected by forge as test cases. Do not name state
+  variables that way.
 - **HCS is unreachable from Solidity** (no precompile; HIP-1208 is an open PR). The audit trail is
   an off-chain service in `services/hcs/` driven by contract events. So emit richly.
 - **Rate agreement is RFQ**: lenders sign EIP-712 quotes off-chain, the borrower executes one.

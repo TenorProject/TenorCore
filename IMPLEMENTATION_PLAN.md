@@ -102,10 +102,10 @@ src/
     MockERC20.sol                  # stands in for USDC
                                    # 0x16b is handled with vm.mockCall, not a mock contract
 script/
-  01_DeployPeriphery.s.sol
+  01_DeployPeriphery.s.sol         # identity registry + compliance module
   02_WireBond.s.sol                # setIdentityRegistry + setCompliance on the ATS bond
-  03_DeploySettlement.s.sol
-  04_Demo.s.sol                    # the filmed sequence, end to end
+  TestnetFlow.s.sol                # the walkthrough: deployAll / openRepo / status /
+                                   # fundRepurchase / repayEarly / closeRepo
 services/
   hcs/                             # Hedera SDK, Go or TS. Topic create + message submit.
                                    # Watches settlement events, writes the audit trail.
@@ -254,7 +254,7 @@ record without re-reading chain state.
 | Day | Deliverable | Owner |
 |---|---|---|
 | ~~Mon 8~~ | *done:* toolchain, interfaces verified against the live ABI, periphery, probe, RFQ settlement contract, mocks, unit tests | — |
-| **Wed 9** | `forge build` and `forge test` green. One repo opens **on testnet**: both legs cross in one transaction. Unwind scheduled, visible on HashScan. **Run the `ScheduleProbe` revert experiment.** | Mahdiye (contract), Mhd (probe) |
+| **Wed 9** | `forge build` and `forge test` green (18 tests). **Stage 1 of TESTNET.md end to end.** One repo opens **on testnet**: both legs cross in one transaction. Unwind scheduled, visible on HashScan. **Run the `ScheduleProbe` revert experiment.** | Mahdiye (contract), Mhd (probe) |
 | **Thu 10** | Unwind fires at maturity end to end. Both close branches confirmed on testnet. Non-verified counterparty rejection working. HCS service consuming real events. | All |
 | **Fri 11** | Thin UI, contracts verified on HashScan via Sourcify. **Feature freeze at end of day.** | Parsa (app), Mahdiye (contract), Mhd (review) |
 | **Sat 12** | Two full rehearsals from a script, then video, README, submit. **Submit tonight, not Sunday.** | Mhd (video), all |
