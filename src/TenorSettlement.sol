@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+
 import {IHederaScheduleService, HSS, HEDERA_SUCCESS} from "./interfaces/IHederaScheduleService.sol";
 import {IHoldByPartition} from "./interfaces/IHoldByPartition.sol";
 
@@ -11,41 +14,76 @@ interface IERC20 {
 }
 
 /// @title TenorSettlement
-/// @notice A repo desk for tokenised securities on Hedera. The trade settles atomically and
-///         the unwind settles itself: the closing leg is handed to the network at open.
-/// @dev THIS CONTRACT IS THE PROJECT. Everything else in the repo is supporting cast.
-///      Read .claude/skills/tenor-hedera/SKILL.md before touching it.
-contract TenorSettlement {
-    // Proven on testnet. 2_000_000 fails hasScheduleCapacity. Do not raise.
+/// @notice A repo desk for tokenised securities on Hedera. The trade settles atomically and the
+///         unwind settles itself: the closing leg is handed to the network at open.
+///
+/// @dev Rate agreement is RFQ, not an order book, because repo against a *specific* security is a
+///      specials trade. The borrower publishes a request, lenders return EIP-712 signed quotes,
+///      and the borrower executes the one they accept. Nothing is negotiated on-chain and nothing
+///      can be substituted: the terms are bound by the lender's signature.
+///
+///      Setup, once per party:
+///        lender   -> approve(cash, TenorSettlement, working amount)
+///        borrower -> authorise TenorSettlement as an ATS operator for the security
+///      Per trade:
+///        lender   -> sign a Quote off-chain, zero transactions
+///        borrower -> openRepo(quote, signature), one transaction
+contract TenorSettlement is EIP712 {
+    using ECDSA for bytes32;
+
+    /// Proven on testnet. 2_000_000 fails hasScheduleCapacity. Do not raise.
     uint256 public constant SCHEDULE_GAS = 200_000;
-    // ~0.12 HBAR per scheduled execution, in tinybars, with headroom.
+    /// ~0.12 HBAR per scheduled execution, in tinybars, with headroom.
     uint256 public constant MIN_HBAR_PER_REPO = 30_000_000;
+    /// Holds must outlive the schedule: after expiry anyone can reclaim to the holder.
+    uint64 public constant HOLD_BUFFER = 3 days;
+
+    bytes32 private constant QUOTE_TYPEHASH = keccak256(
+        "Quote(bytes32 requestId,address lender,address borrower,address security,bytes32 partition,uint256 collateralQty,address cash,uint256 principal,uint256 repurchase,uint64 maturity,uint64 quoteExpiry,uint256 haircutBps)"
+    );
+
+    /// @notice Terms a lender signs off-chain. `repurchase` is the rate, expressed as an amount.
+    struct Quote {
+        bytes32 requestId;
+        address lender;
+        address borrower;
+        address security;
+        bytes32 partition;
+        uint256 collateralQty;
+        address cash;
+        uint256 principal;
+        uint256 repurchase;
+        uint64  maturity;
+        uint64  quoteExpiry;
+        uint256 haircutBps;
+    }
 
     enum Status { None, Open, Closed, Defaulted }
 
     struct Repo {
-        address lender;         // provides cash, receives collateral
-        address borrower;       // provides collateral, receives cash
-        address security;       // ATS diamond
+        address lender;
+        address borrower;
+        address security;
         bytes32 partition;
         uint256 collateralQty;
-        address cash;           // USDC, HTS token via the ERC-20 facade
-        uint256 principal;      // cash moved at open
-        uint256 repurchase;     // cash moved at close; computed off-chain, a trade input
+        address cash;
+        uint256 principal;
+        uint256 repurchase;
         uint64  maturity;
         uint256 haircutBps;
-        uint256 openHoldId;     // borrower's hold, open destination
-        uint256 closeHoldId;    // lender's hold, created at open
+        uint256 closeHoldId;
         address scheduleAddress;
         Status  status;
     }
 
     address public owner;
     mapping(bytes32 => Repo) public repos;
+    /// @notice lender => requestId => cancelled. Lets a lender pull a quote before it expires.
+    mapping(address => mapping(bytes32 => bool)) public quoteCancelled;
 
-    // Events are the ONLY handoff to the audit trail: HCS is unreachable from Solidity
-    // (no precompile, HIP-1208 is an open PR). Emit enough that services/hcs/ can write a
-    // complete record without re-reading chain state.
+    // HCS is unreachable from Solidity (no precompile; HIP-1208 is an open PR), so these events
+    // are the ONLY handoff to the audit trail in services/hcs/. Emit enough to reconstruct the
+    // trade without re-reading chain state.
     event RepoOpened(
         bytes32 indexed id, address indexed lender, address indexed borrower,
         address security, uint256 collateralQty, address cash, uint256 principal,
@@ -55,12 +93,16 @@ contract TenorSettlement {
     event RepoDefaulted(bytes32 indexed id, string reason);
     event MarginCall(bytes32 indexed id, uint256 markedValue, uint256 required);
     event ScheduleStepped(bytes32 indexed id, uint64 requested, uint64 actual);
+    event QuoteCancelled(address indexed lender, bytes32 indexed requestId);
     event Funded(address indexed from, uint256 amount);
 
     error NotOwner();
+    error NotBorrower(address expected, address actual);
     error AlreadyExists(bytes32 id);
+    error QuoteExpired(uint64 quoteExpiry);
+    error QuoteWasCancelled(bytes32 requestId);
+    error BadSignature(address recovered, address expected);
     error MaturityInPast();
-    error HoldExpiresBeforeSchedule(uint256 holdExpiry, uint64 maturity);
     error InsufficientHbarForUnwind(uint256 have, uint256 need);
     error NoScheduleCapacity(uint64 maturity);
     error ScheduleFailed(int64 responseCode);
@@ -68,83 +110,119 @@ contract TenorSettlement {
 
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
 
-    constructor() payable { owner = msg.sender; }
+    constructor() payable EIP712("Tenor", "1") { owner = msg.sender; }
 
     receive() external payable { emit Funded(msg.sender, msg.value); }
+
+    // -------------------------------------------------------------------------------------
+    // QUOTES
+    // -------------------------------------------------------------------------------------
+
+    /// @notice Digest a lender signs. Exposed so off-chain tooling and tests agree with the chain.
+    function hashQuote(Quote calldata q) public view returns (bytes32) {
+        return _hashTypedDataV4(keccak256(abi.encode(
+            QUOTE_TYPEHASH, q.requestId, q.lender, q.borrower, q.security, q.partition,
+            q.collateralQty, q.cash, q.principal, q.repurchase, q.maturity, q.quoteExpiry,
+            q.haircutBps
+        )));
+    }
+
+    /// @notice A lender withdraws a quote before it expires.
+    function cancelQuote(bytes32 requestId) external {
+        quoteCancelled[msg.sender][requestId] = true;
+        emit QuoteCancelled(msg.sender, requestId);
+    }
 
     // -------------------------------------------------------------------------------------
     // OPEN
     // -------------------------------------------------------------------------------------
 
-    /// @notice Cross cash against collateral atomically, then hand the unwind to the network.
-    /// @dev Preconditions the caller must have arranged:
-    ///      1. borrower created an OPEN DESTINATION hold (to == address(0)) over `collateralQty`,
-    ///         escrow = address(this), expiration comfortably AFTER `maturity`;
-    ///      2. lender approved `principal` of `cash` to this contract;
-    ///      3. lender authorised this contract as an ATS operator, so step 5 can create the
-    ///         return-leg hold over the lender's new balance;
-    ///      4. this contract holds HBAR: it is the PAYER for the scheduled unwind.
-    function openRepo(bytes32 id, Repo calldata r) external {
-        if (repos[id].status != Status.None) revert AlreadyExists(id);
-        if (r.maturity <= block.timestamp) revert MaturityInPast();
+    /// @notice Accept a lender's signed quote and open the repo. ONE transaction.
+    /// @dev Crosses cash against collateral atomically, then hands the unwind to the network.
+    ///      Reverting here is correct and safe: nothing has moved yet.
+    function openRepo(Quote calldata q, bytes calldata signature) external {
+        if (msg.sender != q.borrower) revert NotBorrower(q.borrower, msg.sender);
+        if (repos[q.requestId].status != Status.None) revert AlreadyExists(q.requestId);
+        if (block.timestamp > q.quoteExpiry) revert QuoteExpired(q.quoteExpiry);
+        if (quoteCancelled[q.lender][q.requestId]) revert QuoteWasCancelled(q.requestId);
+        if (q.maturity <= block.timestamp) revert MaturityInPast();
         if (address(this).balance < MIN_HBAR_PER_REPO) {
             revert InsufficientHbarForUnwind(address(this).balance, MIN_HBAR_PER_REPO);
         }
 
-        // TODO(day 1): read the borrower's hold and assert its expirationTimestamp > maturity.
-        // After an ATS hold expires ANYONE can permissionlessly reclaim to the holder, which
-        // would make the unwind revert into a settlement that silently did not happen.
-        // revert HoldExpiresBeforeSchedule(holdExpiry, r.maturity);
+        address signer = ECDSA.recover(hashQuote(q), signature);
+        if (signer != q.lender) revert BadSignature(signer, q.lender);
 
-        // 1. cash leg: lender -> borrower
-        if (!IERC20(r.cash).transferFrom(r.lender, r.borrower, r.principal)) revert CashLegFailed();
+        uint256 holdExpiry = uint256(q.maturity) + HOLD_BUFFER;
 
-        // 2. security leg: execute the borrower's open-destination hold, naming the lender
-        // TODO(day 1): VERIFY this signature against the deployed ATS ABI first.
-        IHoldByPartition(r.security).executeHoldByPartition(
-            IHoldByPartition.HoldIdentifier({
-                partition: r.partition, tokenHolder: r.borrower, holdId: r.openHoldId
+        // 1. cash leg: lender -> borrower, against the standing allowance
+        if (!IERC20(q.cash).transferFrom(q.lender, q.borrower, q.principal)) revert CashLegFailed();
+
+        // 2. security leg. We are an ATS operator for the borrower, so we create the hold
+        //    ourselves and immediately execute it. Open destination (to == 0) means we name
+        //    the lender at settlement time.
+        (, uint256 openHoldId) = IHoldByPartition(q.security).createHoldFromByPartition(
+            q.partition,
+            q.borrower,
+            IHoldByPartition.Hold({
+                amount: q.collateralQty,
+                expirationTimestamp: holdExpiry,
+                escrow: address(this),
+                to: address(0),
+                data: ""
             }),
-            r.lender,
-            r.collateralQty
+            ""
+        );
+        IHoldByPartition(q.security).executeHoldByPartition(
+            IHoldByPartition.HoldIdentifier({
+                partition: q.partition, tokenHolder: q.borrower, holdId: openHoldId
+            }),
+            q.lender,
+            q.collateralQty
         );
 
-        // Both legs have now moved, or neither has. No exposure window.
-
-        Repo storage s = repos[id];
-        s.lender = r.lender; s.borrower = r.borrower; s.security = r.security;
-        s.partition = r.partition; s.collateralQty = r.collateralQty; s.cash = r.cash;
-        s.principal = r.principal; s.repurchase = r.repurchase; s.maturity = r.maturity;
-        s.haircutBps = r.haircutBps; s.openHoldId = r.openHoldId;
+        // Both legs have moved, or neither has. No exposure window.
 
         // 3. return-leg hold over the lender's new balance, so closeRepo has something to move
-        // TODO(day 1): createHoldFromByPartition(partition, lender, hold, operatorData),
-        //              escrow = address(this), expiration = maturity + buffer. Store s.closeHoldId.
-        //              NOT operatorCreateHoldByPartition: that name does not exist on the diamond.
+        //    back and the lender cannot move the collateral away during the term.
+        (, uint256 closeHoldId) = IHoldByPartition(q.security).createHoldFromByPartition(
+            q.partition,
+            q.lender,
+            IHoldByPartition.Hold({
+                amount: q.collateralQty,
+                expirationTimestamp: holdExpiry,
+                escrow: address(this),
+                to: address(0),
+                data: ""
+            }),
+            ""
+        );
+
+        Repo storage s = repos[q.requestId];
+        s.lender = q.lender; s.borrower = q.borrower; s.security = q.security;
+        s.partition = q.partition; s.collateralQty = q.collateralQty; s.cash = q.cash;
+        s.principal = q.principal; s.repurchase = q.repurchase; s.maturity = q.maturity;
+        s.haircutBps = q.haircutBps; s.closeHoldId = closeHoldId;
 
         // 4. hand the unwind to the network
-        s.scheduleAddress = _scheduleUnwind(id, r.maturity);
+        s.scheduleAddress = _scheduleUnwind(q.requestId, q.maturity);
         s.status = Status.Open;
 
         emit RepoOpened(
-            id, r.lender, r.borrower, r.security, r.collateralQty, r.cash,
-            r.principal, r.repurchase, r.maturity, s.scheduleAddress
+            q.requestId, q.lender, q.borrower, q.security, q.collateralQty, q.cash,
+            q.principal, q.repurchase, q.maturity, s.scheduleAddress
         );
     }
 
     /// @dev A saturated expiry second makes scheduleCall revert with SCHEDULE_EXPIRY_IS_BUSY.
-    ///      Step forward rather than reverting the trade: a maturity date is a real date.
+    ///      Step forward rather than killing the trade: a maturity date is a real date.
     function _scheduleUnwind(bytes32 id, uint64 maturity) internal returns (address) {
         uint64 target = maturity;
         for (uint64 i; i < 10; ++i) {
             if (IHederaScheduleService(HSS).hasScheduleCapacity(target, SCHEDULE_GAS)) {
                 if (target != maturity) emit ScheduleStepped(id, maturity, target);
-
                 (int64 rc, address addr) = IHederaScheduleService(HSS).scheduleCall(
-                    address(this),
-                    target,
-                    SCHEDULE_GAS,
-                    0,
+                    address(this), target, SCHEDULE_GAS, 0,
                     abi.encodeWithSelector(this.closeRepo.selector, id)
                 );
                 if (rc != HEDERA_SUCCESS) revert ScheduleFailed(rc);
@@ -161,19 +239,18 @@ contract TenorSettlement {
 
     /// @notice Called by the NETWORK at maturity. Nobody is online.
     /// @dev NO ACCESS CONTROL, deliberately: a scheduled execution has no EOA sender.
-    ///      MUST NEVER REVERT. A scheduled transaction fires once and never retries, so a
-    ///      revert here is a settlement that silently did not happen. Two terminal branches,
-    ///      and the default branch is not an error path: it is what a repo does when someone
-    ///      fails to repurchase.
+    ///      MUST NEVER REVERT. A scheduled transaction fires once and never retries, so a revert
+    ///      is a settlement that silently did not happen. The default branch is not an error
+    ///      path: it is what a repo does when someone fails to repurchase.
     function closeRepo(bytes32 id) external {
         Repo storage r = repos[id];
-        if (r.status != Status.Open) return;   // idempotent, quiet
+        if (r.status != Status.Open) return;
 
         bool funded = IERC20(r.cash).allowance(r.borrower, address(this)) >= r.repurchase
                    && IERC20(r.cash).balanceOf(r.borrower)               >= r.repurchase;
 
         if (!funded) {
-            r.status = Status.Defaulted;       // lender keeps the collateral
+            r.status = Status.Defaulted;
             emit RepoDefaulted(id, "repurchase amount not available at maturity");
             return;
         }
@@ -194,7 +271,6 @@ contract TenorSettlement {
             r.status = Status.Closed;
             emit RepoClosed(id, r.repurchase, r.collateralQty);
         } catch {
-            // Cash moved but collateral did not. Flag loudly; do NOT revert.
             r.status = Status.Defaulted;
             emit RepoDefaulted(id, "collateral leg reverted after cash settled");
         }
@@ -204,7 +280,7 @@ contract TenorSettlement {
     // MARGIN  (one rubric point; keep it this small)
     // -------------------------------------------------------------------------------------
 
-    /// @dev No oracle prices our bond: it was minted this week. `markedValue` is an admin-set
+    /// @dev No oracle prices this bond: it was minted this week. `markedValue` is an admin-set
     ///      NAV or a proxy feed, and the README says which.
     function markCollateral(bytes32 id, uint256 markedValue) external onlyOwner {
         Repo storage r = repos[id];
@@ -212,8 +288,6 @@ contract TenorSettlement {
         uint256 required = r.principal + (r.principal * r.haircutBps) / 10_000;
         if (markedValue < required) emit MarginCall(id, markedValue, required);
     }
-
-    // -------------------------------------------------------------------------------------
 
     function sweep() external onlyOwner {
         (bool ok, ) = payable(owner).call{value: address(this).balance}("");
