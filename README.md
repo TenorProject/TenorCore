@@ -75,7 +75,8 @@ This approach was confirmed with ETHGlobal support before the build began.
 | `test/TenorSettlement.t.sol` | Test suite, written to double as the testnet runbook. |
 | `script/TestnetFlow.s.sol` | Step-by-step testnet walkthrough, one entrypoint per step. |
 | `TESTNET.md` | How to deploy and test on Hedera testnet. |
-| `IMPLEMENTATION_PLAN.md` | Build plan. |
+| `IMPLEMENTATION_PLAN.md` | Build plan and the decisions behind it. |
+| `STATUS.md` | What is deployed and what is proven on testnet. |
 | `TOOLING.md` | Dev setup. |
 
 ## Build

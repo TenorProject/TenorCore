@@ -2,7 +2,8 @@
 
 Repo desk for tokenised securities on Hedera. **Submission: Sun 13 Sep, 12:00 EDT / 19:00 Istanbul.**
 
-Read `ethonline-2026/tenor-handoff.md` for the full context. This file is the build plan only.
+`STATUS.md` is what is true right now. `CLAUDE.md` is the working contract. **This file is the
+build plan and the record of decisions**: what we are building, why, and what is closed.
 
 ---
 
@@ -44,13 +45,15 @@ solc = "0.8.28"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 100
+via_ir = true
 
 [rpc_endpoints]
 hedera_testnet = "https://testnet.hashio.io/api"
 ```
 
 Match ATS's compiler exactly (0.8.28 / cancun / 100 runs). Mismatched settings against a diamond
-produce failures that look like permissions bugs.
+produce failures that look like permissions bugs. `via_ir` is codegen only, required for `openRepo`
+to compile past "stack too deep", and does not affect ABI compatibility.
 
 ### What Solidity can and cannot reach on Hedera
 
@@ -113,7 +116,7 @@ test/
   TenorSettlement.t.sol
 ```
 
-Delete `Counter.sol`, `Counter.s.sol`, `Counter.t.sol` in the first commit.
+`STATUS.md` records which of these are deployed. Do not infer deployment from a file existing.
 
 ---
 
@@ -205,8 +208,10 @@ someone fails to repurchase.
 ### Events matter more than usual
 
 Since HCS is unreachable from Solidity, every event is the only handoff to the audit trail. Emit
-enough on `openRepo`, `closeRepo`, margin call and default that the HCS service can write a complete
-record without re-reading chain state.
+enough on open, close, early repayment and default that the HCS service can write a complete record
+without re-reading chain state. The declared set is `RepoOpened`, `RepoClosed`, `RepoRepaidEarly`,
+`RepoDefaulted`, `ScheduleStepped`, `QuoteCancelled`, `Funded`. There is no `MarginCall`; it was
+removed with the oracle.
 
 ### Constants proven on testnet
 
@@ -249,21 +254,80 @@ record without re-reading chain state.
 
 ---
 
-## 6. Five days
+## 6. What happens next, in order
 
-| Day | Deliverable | Owner |
-|---|---|---|
-| ~~Mon 8~~ | *done:* toolchain, interfaces verified against the live ABI, periphery, probe, RFQ settlement contract, mocks, unit tests | — |
-| **Wed 9** | `forge build` and `forge test` green (18 tests). **Stage 1 of TESTNET.md end to end.** One repo opens **on testnet**: both legs cross in one transaction. Unwind scheduled, visible on HashScan. **Run the `ScheduleProbe` revert experiment.** | Mahdiye (contract), Mhd (probe) |
-| **Thu 10** | Unwind fires at maturity end to end. Both close branches confirmed on testnet. Non-verified counterparty rejection working. HCS service consuming real events. | All |
-| **Fri 11** | Thin UI, contracts verified on HashScan via Sourcify. **Feature freeze at end of day.** | Parsa (app), Mahdiye (contract), Mhd (review) |
-| **Sat 12** | Two full rehearsals from a script, then video, README, submit. **Submit tonight, not Sunday.** | Mhd (video), all |
-| Sun 13 | Buffer only. Deadline 19:00 Istanbul. | — |
+**As of 9 Sep the settlement contract has never run on testnet.** Four days remain. The queue below
+is ordered by risk, not by convenience. Do not start an item before the one above it is green, and
+do not start building anything new while items 1 and 2 are open.
 
-**On the 10th, choosing between one more feature and a rehearsed video: choose the video.**
-Async judging screens to roughly the top 20% before a human speaks to us, and it screens on the tape.
+Each item states how you know it worked. If it did not, open the `tenor-debug` skill before
+investigating, then record what you learned in `STATUS.md`.
 
----
+### 1. Confirm the unit suite (minutes)
+
+```bash
+forge test
+```
+
+**Green when:** 18 of 18 pass. If tests fail on signatures or on the wrong caller, it is the
+cheatcode-hoisting trap, not your logic. See `tenor-debug`.
+
+### 2. Settle the reverting-schedule question (20 minutes, can run in parallel)
+
+`ScheduleProbe` is already deployed. `setShouldRevert(true)`, then `arm(900, 200000)`, then wait
+and read `status()` and the schedule on HashScan.
+
+**Answered when:** you can say whether a reverting scheduled call is consumed with no retry.
+**Why it is second:** `closeRepo`'s entire two-branch, never-revert design assumes it is. If the
+network retries, that design is wrong and we would rather know on the 9th than the 12th.
+
+### 3. Stage 1 of `TESTNET.md` end to end (the critical path)
+
+Mock securities, mock cash, **real HIP-1215**. Deploy, open one repo, watch the schedule fire.
+
+**Green when:** the cash transfer and both hold operations appear in **one** transaction record on
+HashScan, a pending schedule is visible with a future expiry, and at maturity the repo reaches
+`Closed` without any transaction of ours settling it.
+
+This proves the two things `forge test` cannot: that one call can cross both legs, and that the
+network runs our unwind. Everything after this is presentation.
+
+Use `--gas-limit 4000000`. An empty revert here is gas, not logic.
+
+### 4. Both close branches, plus the compliance rejection
+
+Default (skip `fundRepurchase`, wait, expect `Defaulted` without a revert) and early repayment
+(`repayEarly`, then confirm the orphaned schedule fires harmlessly). Then switch
+`permitAllForTestnet` off, whitelist exactly the two counterparties, and have a third account be
+refused by the token itself.
+
+**Green when:** all three film cleanly.
+
+### 5. Stage 2, the real securities layer
+
+Swap `MockATS` for the ATS bond and `MockERC20` for an HTS token. Expect operator authorisation and
+token association to bite, in that order.
+
+**Cut this if item 4 is not finished by Thursday night.** A complete demo on mocks beats a broken
+one on the real bond, as long as the README is honest about which is which.
+
+### 6. Presentation: UI, HCS service, verification, video
+
+Contracts verified on HashScan via Sourcify as they deploy, not on the last day. Thin UI and the
+HCS audit trail are both cuttable. The video is not.
+
+### Calendar
+
+| Day | Target |
+|---|---|
+| **Wed 9** | items 1, 2 and 3. Stage 1 green on testnet. |
+| **Thu 10** | item 4. Start item 5 only if item 4 is done. |
+| **Fri 11** | UI, verification, README. **Feature freeze at end of day.** |
+| **Sat 12** | Two full rehearsals from a script, then video, then **submit tonight**. |
+| Sun 13 | Buffer only. Deadline 19:00 Istanbul. |
+
+**Choosing between one more feature and a rehearsed video: choose the video.** Async judging screens
+to roughly the top 20% before a human speaks to us, and it screens on the tape.
 
 ## 7. Non-negotiables
 
