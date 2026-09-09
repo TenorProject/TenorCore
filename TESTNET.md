@@ -54,29 +54,94 @@ approval.
 denominated in. Locally in `forge test` the same balance is in wei, so that guard is far weaker
 under unit test than it is here. Do not be surprised by the difference.
 
+**If `--broadcast` fails with `Nonce too low` before anything was sent, or `--resume` loops on
+`WRONG_NONCE`, that is the public Hashio relay lying under load, not a real conflict.** Check
+`.claude/skills/tenor-debug/SKILL.md` ("Hashio nonce lies during `forge script --broadcast`")
+before assuming the deploy actually failed — cross-check the mirror node
+(`https://testnet.mirrornode.hedera.com/api/v1/accounts/<addr>`) before retrying anything.
+
 ### 2. Verify the contracts
 
+`.env` already has the addresses from step 1, so export them into the shell first:
+
 ```bash
-forge verify-contract <TENOR_SETTLEMENT> src/TenorSettlement.sol:TenorSettlement \
+set -a; source .env; set +a
+```
+
+Then, one job per contract (do not type `<TENOR_SETTLEMENT>` literally — zsh reads a bare `<name>`
+as an input redirect and fails with "no such file or directory"; use the `$VAR` form below instead):
+
+```bash
+forge verify-contract "$TENOR_SETTLEMENT" src/TenorSettlement.sol:TenorSettlement \
+  --verifier sourcify --rpc-url hedera_testnet
+forge verify-contract "$SECURITY" src/mocks/MockATS.sol:MockATS \
+  --verifier sourcify --rpc-url hedera_testnet
+forge verify-contract "$CASH" src/mocks/MockERC20.sol:MockERC20 \
   --verifier sourcify --rpc-url hedera_testnet
 ```
 
-Verified contracts on HashScan are a stated prize requirement, so do this as you go rather than on
-the last day.
+Each submission prints a `Verification Job ID`. Check it with (no `--rpc-url` on this subcommand):
+
+```bash
+forge verify-check <job-id> --verifier sourcify
+```
+
+Look for `Status: exact_match` on HashScan. Verified contracts are a stated prize requirement, so
+do this as you go rather than on the last day.
 
 ### 3. Open the repo
 
+**`forge script` cannot send this transaction. Do not try `--sig "openRepo()" --broadcast` here,
+no matter what flags you add.** `openRepo` calls `scheduleCall` on `0x16b`, and `forge script` must
+run the script function *locally* first (against Foundry's own `revm`) to know what to broadcast.
+revm has no implementation of Hedera's Schedule Service precompile, so that local run always
+reverts with `call to non-contract address 0x...016B` before anything is ever sent, no matter how
+high `--gas-limit` is set. `--skip-simulation` does not help either: it skips a separate, later
+dry-run of already-collected transactions, not this initial local run, which is not optional. See
+`.claude/skills/tenor-debug/SKILL.md` if you want the full story.
+
+Build and send the same call directly with `cast` instead, sourcing what `deployAll()` wrote to
+`.env`. This is the exact recipe `TestnetFlow.s.sol::openRepo()` follows internally (`hashQuote`,
+then `vm.sign`, then the call), just run outside forge's local EVM so the real network sees it:
+
 ```bash
-forge script script/TestnetFlow.s.sol --sig "openRepo()" \
-  --rpc-url hedera_testnet --broadcast --gas-limit 4000000
+set -a; source .env; set +a
+
+REQID_HASH=$(cast keccak "$REQUEST_ID")
+LENDER=$(cast wallet address --private-key "$LENDER_PRIVATE_KEY")
+BORROWER=$(cast wallet address --private-key "$BORROWER_PRIVATE_KEY")
+NOW=$(date +%s); MATURITY=$((NOW + 900)); QUOTE_EXPIRY=$((NOW + 600))
+QUOTE_TUPLE="($REQID_HASH,$LENDER,$BORROWER,$SECURITY,0x0000000000000000000000000000000000000000000000000000000000000001,100000000000000000000,$CASH,100000000000,100096000000,$MATURITY,$QUOTE_EXPIRY,200)"
+
+DIGEST=$(cast call "$TENOR_SETTLEMENT" \
+  "hashQuote((bytes32,address,address,address,bytes32,uint256,address,uint256,uint256,uint64,uint64,uint256))(bytes32)" \
+  "$QUOTE_TUPLE" --rpc-url hedera_testnet)
+
+SIG=$(cast wallet sign --private-key "$LENDER_PRIVATE_KEY" --no-hash "$DIGEST")
+
+cast send "$TENOR_SETTLEMENT" \
+  "openRepo((bytes32,address,address,address,bytes32,uint256,address,uint256,uint256,uint64,uint64,uint256),bytes)" \
+  "$QUOTE_TUPLE" "$SIG" \
+  --rpc-url hedera_testnet --private-key "$BORROWER_PRIVATE_KEY" --gas-limit 4000000
 ```
 
-The lender signs off-chain and sends nothing. The borrower sends **one** transaction.
+The lender signs off-chain (the `cast wallet sign` line, no transaction). The borrower sends **one**
+transaction (the `cast send`). `cast wallet sign --no-hash` signs the raw digest directly, matching
+`vm.sign(pk, digest)` exactly, so this is not reimplementing EIP-712 by hand: the digest itself
+still comes from the contract's own `hashQuote`.
 
-**Set the outer gas limit high, and do not trust the estimate.** This is the single most likely
-way stage 1 fails on the first attempt. `scheduleCall` on `0x16b` reverts with *empty returndata*
-when it is starved of gas; the HIP's promise that it never reverts covers business failures, not
-gas starvation. Another team measured the floor for the precompile alone at roughly **1,445,000 to
+**Run all of this in one shell session, not split across separate terminal invocations.** Every
+value derived from `$NOW` must be identical between the `hashQuote` call and the `openRepo` send.
+If `MATURITY`/`QUOTE_EXPIRY` drift between the two (e.g. recomputed a minute apart in a fresh
+shell), the signature is valid for a *different* quote than the one you send, and it reverts with
+`BadSignature(recovered, expected)` where `recovered` is neither party's address. That looks like a
+signing bug and is not. A client-side revert here writes nothing on-chain, so `requestId` is still
+free and safe to retry immediately.
+
+**Set the outer gas limit high, and do not trust an estimate.** This is the single most likely way
+stage 1 fails on the first attempt. `scheduleCall` on `0x16b` reverts with *empty returndata* when
+it is starved of gas; the HIP's promise that it never reverts covers business failures, not gas
+starvation. Another team measured the floor for the precompile alone at roughly **1,445,000 to
 1,469,000** gas, and our own `ScheduleProbe.arm()` burned 1,511,069 in total, which is consistent
 with that floor plus a little overhead.
 
@@ -84,11 +149,8 @@ with that floor plus a little overhead.
 execution all run *before* `scheduleCall`. Worse, EIP-150's 63/64 rule means the precompile only
 ever receives 63/64 of the gas remaining at that point, so an outer limit that looks generous can
 still hand the precompile less than its floor. A 1.5M outer limit forwards about 1.457M, which is
-inside the failure band. 4,000,000 leaves real headroom.
-
-If `--gas-limit` does not take, use `--gas-estimate-multiplier 300` instead: hashio's
-`eth_estimateGas` does not model system contract calls well, so the default 130% multiplier is
-applied to an estimate that was already wrong.
+inside the failure band. `--gas-limit 4000000` leaves real headroom; measured actual usage on
+testnet was 1,959,528.
 
 Note this is a *different* number from `SCHEDULE_GAS` (200,000), which is the budget the network
 gets for executing `closeRepo` later. That one must stay small, because `hasScheduleCapacity`
@@ -103,6 +165,15 @@ demo beat one.
 ```bash
 forge script script/TestnetFlow.s.sol --sig "status()" --rpc-url hedera_testnet
 ```
+
+This is a plain view call with no precompile in its path, so plain `forge script` (no `--broadcast`,
+no `--skip-simulation`) works fine here, unlike step 3.
+
+**Ignore the `contract HBAR balance (tinybars)` line from this specific command.** Run this way
+(no `--broadcast`), `forge script` sources `address(this).balance` from the JSON-RPC fork's
+`eth_getBalance`, which reports weibar, not the tinybars the label says and not what the same
+expression returns when the contract executes for real. Divide by `1e10` to get tinybars, or just
+check the mirror node.
 
 Take `schedule` from the output and look it up on HashScan. **A pending schedule with a future
 expiry, that nobody has to run, is the shot.** Screenshot it.

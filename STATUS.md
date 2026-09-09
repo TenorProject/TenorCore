@@ -4,7 +4,8 @@
 true on chain. Everything else in this repo describes what we intend; this file describes what
 has been observed.
 
-Last updated: **9 Sep 2026**, by Mhd.
+Last updated: **9 Sep 2026**, `deployAll()` and a real `openRepo()` both completed via Claude Code;
+schedule `0.0.10439570` pending, expected to fire ~13:41:54 UTC.
 Submission deadline: **Sun 13 Sep 2026, 12:00 EDT / 19:00 Istanbul.**
 
 ---
@@ -35,9 +36,9 @@ or `0x167`.
 | `ScheduleProbe` | `0x3102F4Bcba8F781B6d7cf697A5af32EE829A1438` | HIP-1215 evidence rig, rerunnable |
 | `TenorIdentityRegistry` | *fill in from `.env`* | wired into the bond, without it every mint reverts |
 | `TenorCompliance` | *fill in from `.env`* | same |
-| `TenorSettlement` | **not deployed** | this is the next thing to change |
-| Mock security (stage 1) | not deployed | `MockATS`, printed by `deployAll()` |
-| Mock cash (stage 1) | not deployed | `MockERC20`, printed by `deployAll()` |
+| `TenorSettlement` (stage 1) | `0x8f9EE0a9Aae23fDe01e12cF6A6c9F024C59D4DB9` | funded with 5 HBAR at construction; balance confirmed 500,000,000 tinybars on the mirror node |
+| Mock security (stage 1) | `0xF1905080409B05590e9dADA9836F2dd612136BAE` | `MockATS`, borrower holds 100e18 QTY |
+| Mock cash (stage 1) | `0xbb0Bc9B3eB630e6e1ea4df3D23DF4Dd8d285603e` | `MockERC20`, lender holds PRINCIPAL, borrower holds REPURCHASE, lender has approved settlement for max |
 
 Addresses live in `.env`, which is gitignored. Copy them here when they stop changing, so the
 next person does not have to ask for them.
@@ -54,6 +55,11 @@ next person does not have to ask for them.
 | `hasScheduleCapacity` refuses a 2,000,000 inner gas limit | 200,000 succeeds; this is why `SCHEDULE_GAS` is 200,000 |
 | An ATS bond mints once our own identity registry and compliance module are wired in | bond address above |
 | `address(this).balance` reads **tinybars**, not weibar | contract read `2000000000` for a 20 HBAR balance |
+| Stage 1 `deployAll()` fully complete: `TenorSettlement` funded, `MockATS`/`MockERC20` deployed, lender and borrower positioned, lender's approval done | balances and allowance read back correct on testnet, see *Deployed* table above |
+| **The atomic cross: `openRepo` pulling cash, creating and executing the borrower's hold, creating the return hold, and scheduling `closeRepo` all in ONE real transaction** | tx `0x6f1bb8013a99a085779fa7383ce6606f6b2a07b60cc2db73657a9d04501cf201`, status success, gas used 1,959,528 of a 4,000,000 limit. `status()` reads back `Open`, `repurchase owed` correct |
+| **`scheduleCall` from inside real `openRepo` execution (not `ScheduleProbe`) succeeds well under the gas floor concern** | same tx as above. `--gas-limit 4000000` was enough with headroom to spare; the 63/64 forwarding worry from `TESTNET.md` did not bite in practice here |
+| A schedule created by `openRepo` (not `ScheduleProbe`) is visible and pending on the mirror node | schedule `0.0.10439570`, `expiration_time` `1788961314` matching `maturity` exactly, `executed_timestamp: null`, `wait_for_expiry: true` |
+| **Early repayment: `repayEarly()` closes the repo before maturity, cash and collateral both round-trip** | second repo `repo-2-early`, opened tx `0xa54fd7d7f300348c5443f352cb03584ff56b8793b335ebe7fa962d257a702a2b`, closed via `repayEarly()` (plain `forge script --broadcast`, no precompile in this call path so it needed none of the `cast` workaround). `status()` reads back `2` (Closed) well before its `maturity` |
 
 ---
 
@@ -61,15 +67,14 @@ next person does not have to ask for them.
 
 | # | Unknown | Why it matters | How to settle it |
 |---|---|---|---|
-| 1 | **One contract call doing an ERC-20-facade cash transfer and an ATS hold execution together** | this is the atomic cross. It is the entire project and it has never run | stage 1 of `TESTNET.md`, step 3 |
 | 2 | **What the network does when a scheduled call reverts** | `closeRepo`'s never-revert design and its two-branch structure assume: fires once, consumed, no retry | `ScheduleProbe.setShouldRevert(true)`, then `arm()`, then wait and read `status()` |
-| 3 | **The gas floor for `scheduleCall`** | reported by another team at ~1.45M, not verified by us. If real, an under-gassed `openRepo` reverts with empty returndata | run `openRepo` with `--gas-limit 4000000` and read the actual gas used from the mirror node |
 | 4 | ATS operator authorisation on the real diamond | `MockATS` does not enforce it, the real one does. Most likely stage 2 failure | stage 2 of `TESTNET.md` |
 | 5 | HTS token association for the cash leg | a plain ERC-20 needs no association, so stage 1 hides this completely | stage 2 |
 | 6 | Whether `forge test` is green after the cheatcode fixes | 13 of 18 were failing; the fix is committed, the run is not confirmed | `forge test` |
+| 7 | **Whether `closeRepo` actually fires unattended at maturity for a *real* `openRepo`-created schedule** | item 1/3 (below) proved `openRepo` schedules correctly; this is the other half — nobody has watched one fire yet outside `ScheduleProbe` | wait for schedule `0.0.10439570` (repo `repo-1`, still Open) to reach `executed_timestamp`, expected ~13:41:54 UTC 9 Sep 2026, then re-run `status()` |
+| 8 | **Whether an orphaned schedule (repo already closed by `repayEarly`) really fires and does nothing, as the never-revert design assumes** | this is the specific claim `TESTNET.md` step 6 asks you to film | wait for schedule `0.0.10439736` (repo `repo-2-early`, already Closed) to reach `executed_timestamp`, expected ~13:51:46 UTC 9 Sep 2026, confirm `status()` still reads `2` and nothing reverted |
 
-**Item 1 and item 2 are both answerable today and neither needs anything built.** Do them before
-writing any new Solidity.
+Items 1 and 3 from this list are now **Proven**, below — settled 9 Sep 2026.
 
 ---
 
