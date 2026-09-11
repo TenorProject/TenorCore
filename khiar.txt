@@ -1,0 +1,28 @@
+
+Tenor — a repo desk for tokenised securities on Hedera.
+Instead of an order book or a lending pool, a lender signs an EIP-712 quote off-chain for a specific security (this is a specials trade, 
+not a fungible market) and the borrower executes it in one call: cash moves, both ATS holds get created and the first one executes 
+immediately, and the unwind gets handed to the network at open. No keeper, no liquidation bot. At maturity the network calls back with 
+nobody online: either the borrower repurchased and gets the collateral back, or they didn't and the lender keeps it. That second branch 
+isn't an error path, it's just what a repo does on non-repayment, so there's no price oracle and no margin call, the haircut at open is 
+the entire risk control.
+What we're using:
+- ATS — collateral is a real ERC-3643 security we issued ourselves. ATS ships no identity registry or compliance module (both required, 
+neither shipped), so we deployed and wired minimal ones; the permissive testnet default gets swapped for an explicit two-address allowlist
+before the demo.
+- HIP-1215 — openRepo schedules closeRepo in the same transaction that moves cash and executes the collateral hold, so scheduling isn't a 
+separate step, it's inside the atomic open. Two real repos opened and settled end-to-end on testnet today: one defaulted correctly (fired 
+255ms after expiry, collateral left locked with the lender, borrower's return hold never executed), one was repaid early and its 
+now-orphaned schedule is expected to fire and do nothing. Settlement contract is payer_account_id on both.
+Settlement 0x8f9EE0a9Aae23fDe01e12cF6A6c9F024C59D4DB9 (stage 1, mocked cash/security to isolate the HIP-1215 unknown; real bond is 
+deployed separately at 0xc2dadb01462b766bb2f58c9638b32e97200ca07d with our identity registry/compliance already wired, swapping it in is 
+next).
+Two things we'd take a second opinion on:
+- Has anyone gotten forge script --broadcast to actually send a transaction that calls 0x16b or 0x167? Ours reverts locally with call to 
+non-contract address every time, because forge has to run the script function against its own EVM first to know what to broadcast, and 
+that EVM doesn't implement either precompile. --skip-simulation doesn't help, it skips a different, later step. We've been hand-building 
+calldata with cast instead, works fine, just curious if there's a cleaner path.
+- Anyone gotten operator authorisation working smoothly against the real ATS diamond (not the permissive testnet mock)? Haven't hit that 
+wall yet ourselves, it's next on our list.
+One that might save someone time: watch for a Nonce too low on the public Hashio relay under load where eth_getTransactionCount disagrees 
+with the error and keeps climbing on retry. Real chain nonce was untouched both times, mirror node confirmed it, the relay was just lying.

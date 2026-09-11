@@ -31,8 +31,14 @@ interface IHoldByPartition {
         external returns (bool success_, uint256 holdId_);
 
     /// @dev Real ATS name is `createHoldFromByPartition`, not `operatorCreateHoldByPartition`
-    ///      (that name does not exist on the diamond and would hit the fallback). Requires the
-    ///      caller to have been authorised as an ATS operator by `_from`.
+    ///      (that name does not exist on the diamond and would hit the fallback).
+    ///
+    ///      AUTHORISATION IS AN ERC-20 ALLOWANCE, NOT THE OPERATOR LIST. `From` here means
+    ///      the same thing it means in `transferFrom`: ATS reads
+    ///      erc20Stor.allowed[_from][msg.sender] and reverts InsufficientAllowance(spender,
+    ///      from) when it is short. `authorizeOperator` does NOT satisfy it; verified on
+    ///      testnet, where authorizeOperator succeeded and the hold still failed with
+    ///      0xf180d8f9. Both counterparties must `approve` TenorSettlement.
     function createHoldFromByPartition(
         bytes32 _partition, address _from, Hold calldata _hold, bytes calldata _operatorData
     ) external returns (bool success_, uint256 holdId_);

@@ -6,7 +6,10 @@ through `script/TestnetFlow.s.sol`. See `TESTNET.md`.
 
 ## What is here
 
-- **`MockATS.sol`** — the ATS hold surface, and only the parts `TenorSettlement` calls:
+- **`MockATS.sol`** — **NO LONGER USED.** Kept only as a record of the ERC-1400 hold surface from
+  the previous true-sale design. `TenorSettlement` now escrows collateral via plain ERC-20
+  `transferFrom`, so nothing in the test suite or the scripts references this file. Delete it
+  once you are sure the escrow model is the one being submitted. Formerly it modelled:
   `createHoldFromByPartition` and `executeHoldByPartition`. It models the accounting that matters,
   `total = available + held`, and executes a hold as an escrow transfer. `setFailExecute(true)`
   forces the execute leg to fail, which is how the `try/catch` fallbacks in `closeRepo` are tested.

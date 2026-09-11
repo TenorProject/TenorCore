@@ -5,17 +5,26 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {IHederaScheduleService, HSS, HEDERA_SUCCESS} from "./interfaces/IHederaScheduleService.sol";
-import {IHoldByPartition} from "./interfaces/IHoldByPartition.sol";
-
 interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function transfer(address to, uint256 amount) external returns (bool);
     function allowance(address owner, address spender) external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
 }
 
 /// @title TenorSettlement
-/// @notice A repo desk for tokenised securities on Hedera. The trade settles atomically and the
-///         unwind settles itself: the closing leg is handed to the network at open.
+/// @notice Compliance-gated collateralised lending against tokenised securities on Hedera. The
+///         trade settles atomically and the unwind settles itself: the closing leg is handed to
+///         the network at open.
+///
+/// @dev CUSTODY MODEL: this contract ESCROWS the collateral for the term. At open the security
+///      moves borrower -> this contract, and the cash moves lender -> borrower. At maturity the
+///      collateral goes to whichever side earned it: back to the borrower if they repurchase,
+///      on to the lender if they do not. The lender never holds the security during the term.
+///
+///      This is a collateralised loan, NOT a true-sale repurchase agreement. Chosen deliberately
+///      for operational simplicity: one approval per side and no ERC-1400 hold lifecycle to
+///      manage. Do not describe it as a repo with title transfer.
 ///
 /// @dev Rate agreement is RFQ, not an order book, because repo against a *specific* security is a
 ///      specials trade. The borrower publishes a request, lenders return EIP-712 signed quotes,
@@ -24,15 +33,15 @@ interface IERC20 {
 ///
 ///      There is deliberately NO price oracle and NO margin call. A repo is over-collateralised
 ///      at open by the haircut and short-dated, and the lender's remedy on default is keeping
-///      collateral they already hold. That is how bilateral term repo actually works, and it
-///      means there is no feed to manipulate.
+///      collateral it is already escrowing on their behalf. It is short-dated and
+///      over-collateralised from the start, so there is no feed to manipulate.
 ///
-///      Setup, once per party:
-///        lender   -> approve(cash, TenorSettlement, working amount)
-///        borrower -> authorise TenorSettlement as an ATS operator for the security
+///      Setup, ONE approval per party, once:
+///        lender   -> approve(cash,     TenorSettlement, working amount)
+///        borrower -> approve(security, TenorSettlement, working amount)
 ///      Per trade:
-///        lender   -> sign a Quote off-chain, zero transactions
-///        borrower -> openRepo(quote, signature), one transaction
+///        lender   -> sign a Quote off-chain, ZERO transactions
+///        borrower -> openRepo(quote, signature), ONE transaction
 contract TenorSettlement is EIP712 {
     using ECDSA for bytes32;
 
@@ -40,8 +49,6 @@ contract TenorSettlement is EIP712 {
     uint256 public constant SCHEDULE_GAS = 200_000;
     /// ~0.12 HBAR per scheduled execution, in tinybars, with headroom.
     uint256 public constant MIN_HBAR_PER_REPO = 30_000_000;
-    /// Holds must outlive the schedule: after expiry anyone can reclaim to the holder.
-    uint64 public constant HOLD_BUFFER = 3 days;
 
     bytes32 private constant QUOTE_TYPEHASH = keccak256(
         "Quote(bytes32 requestId,address lender,address borrower,address security,bytes32 partition,uint256 collateralQty,address cash,uint256 principal,uint256 repurchase,uint64 maturity,uint64 quoteExpiry,uint256 haircutBps)"
@@ -59,7 +66,7 @@ contract TenorSettlement is EIP712 {
         ///      Must have approved `cash` to this contract (standing approval, set up once).
         address lender;
         /// @dev Must be msg.sender on openRepo. Pledges the collateral, receives `principal`.
-        ///      Must have authorised this contract as an ATS operator, so we can create their hold.
+        ///      Must have approved `security` to this contract so it can be pulled into escrow.
         address borrower;
         /// @dev The ATS diamond. An ERC-3643 / ERC-1400 security, not an ERC-20.
         address security;
@@ -136,12 +143,13 @@ contract TenorSettlement is EIP712 {
         /// @dev Over-collateralisation in basis points as agreed at open. Recorded, not
         ///      enforced intraday: see the Quote field for why there is no margin call.
         uint256 haircutBps;
-        /// @dev The ATS hold created over the LENDER's balance at open, with this contract as
-        ///      escrow. Two jobs: it locks the collateral for the term so the lender cannot move
-        ///      it away and leave nothing to give back, and it is what closeRepo executes back to
-        ///      the borrower on repurchase. Its expiry is maturity + HOLD_BUFFER, because after a
-        ///      hold expires anyone may reclaim it to the holder.
-        uint256 closeHoldId;
+        /// @dev Units of `security` this contract still holds in escrow for this repo. Set to
+        ///      `collateralQty` at open and zeroed the moment the collateral leaves, whichever
+        ///      side it goes to. Non-zero on a TERMINAL repo means delivery failed and the
+        ///      collateral is stranded here: `claimCollateral` retries it permissionlessly.
+        ///      Occupies the slot the old ERC-1400 hold id used, so the `repos()` tuple keeps
+        ///      its shape and existing callers need no ABI change.
+        uint256 escrowedQty;
         /// @dev Address of the HIP-1215 schedule that will call closeRepo. Kept so the pending
         ///      settlement is inspectable on HashScan and reconstructable in the HCS trail.
         address scheduleAddress;
@@ -169,6 +177,7 @@ contract TenorSettlement is EIP712 {
     event ScheduleStepped(bytes32 indexed id, uint64 requested, uint64 actual);
     event QuoteCancelled(address indexed lender, bytes32 indexed requestId);
     event Funded(address indexed from, uint256 amount);
+    event CollateralClaimed(bytes32 indexed id, address indexed to, uint256 amount);
 
     error NotOwner();
     error InternalOnly();
@@ -182,7 +191,10 @@ contract TenorSettlement is EIP712 {
     error NoScheduleCapacity(uint64 maturity);
     error ScheduleFailed(int64 responseCode);
     error CashLegFailed();
+    error SecurityLegFailed();
     error NotOpen(bytes32 id);
+    error NotTerminal(bytes32 id);
+    error NothingEscrowed(bytes32 id);
 
     modifier onlyOwner() {
         _onlyOwner();
@@ -236,58 +248,26 @@ contract TenorSettlement is EIP712 {
         address signer = ECDSA.recover(hashQuote(q), signature);
         if (signer != q.lender) revert BadSignature(signer, q.lender);
 
-        uint256 holdExpiry = uint256(q.maturity) + HOLD_BUFFER;
-
-        // 1. cash leg: lender -> borrower, against the standing allowance
+        // 1. cash leg: lender -> borrower, against the lender's standing approval.
         if (!IERC20(q.cash).transferFrom(q.lender, q.borrower, q.principal)) revert CashLegFailed();
 
-        // 2. security leg. We are an ATS operator for the borrower, so we create the hold
-        //    ourselves and immediately execute it. Open destination (to == 0) means we name
-        //    the lender at settlement time.
-        (, uint256 openHoldId) = IHoldByPartition(q.security).createHoldFromByPartition(
-            q.partition,
-            q.borrower,
-            IHoldByPartition.Hold({
-                amount: q.collateralQty,
-                expirationTimestamp: holdExpiry,
-                escrow: address(this),
-                to: address(0),
-                data: ""
-            }),
-            ""
-        );
-        IHoldByPartition(q.security).executeHoldByPartition(
-            IHoldByPartition.HoldIdentifier({
-                partition: q.partition, tokenHolder: q.borrower, holdId: openHoldId
-            }),
-            q.lender,
-            q.collateralQty
-        );
+        // 2. security leg: borrower -> THIS CONTRACT. The collateral is escrowed here for the
+        //    term, not delivered to the lender. Requires the borrower's standing approval on
+        //    `security`. Note this contract must itself pass the security's compliance checks to
+        //    receive it, so it has to be verified in the identity registry.
+        if (!IERC20(q.security).transferFrom(q.borrower, address(this), q.collateralQty)) {
+            revert SecurityLegFailed();
+        }
 
         // Both legs have moved, or neither has. No exposure window.
-
-        // 3. return-leg hold over the lender's new balance, so closeRepo has something to move
-        //    back and the lender cannot move the collateral away during the term.
-        (, uint256 closeHoldId) = IHoldByPartition(q.security).createHoldFromByPartition(
-            q.partition,
-            q.lender,
-            IHoldByPartition.Hold({
-                amount: q.collateralQty,
-                expirationTimestamp: holdExpiry,
-                escrow: address(this),
-                to: address(0),
-                data: ""
-            }),
-            ""
-        );
 
         Repo storage s = repos[q.requestId];
         s.lender = q.lender; s.borrower = q.borrower; s.security = q.security;
         s.partition = q.partition; s.collateralQty = q.collateralQty; s.cash = q.cash;
         s.principal = q.principal; s.repurchase = q.repurchase; s.maturity = q.maturity;
-        s.haircutBps = q.haircutBps; s.closeHoldId = closeHoldId;
+        s.haircutBps = q.haircutBps; s.escrowedQty = q.collateralQty;
 
-        // 4. hand the unwind to the network
+        // 3. hand the unwind to the network
         s.scheduleAddress = _scheduleUnwind(q.requestId, q.maturity);
         s.status = Status.Open;
 
@@ -353,26 +333,66 @@ contract TenorSettlement is EIP712 {
         bool funded = IERC20(r.cash).allowance(r.borrower, address(this)) >= r.repurchase
                    && IERC20(r.cash).balanceOf(r.borrower)               >= r.repurchase;
 
-        if (!funded) {
-            // The lender already holds the collateral from open, so there is nothing to move:
-            // we only have to stop the return leg from happening. Terminal.
-            r.status = Status.Defaulted;
-            emit RepoDefaulted(id, "repurchase amount not available at maturity");
-            return;
+        if (funded) {
+            // Both legs in a single self-call so the EVM rolls back both if either fails.
+            // No partial settlement: cash cannot move without collateral following.
+            try this._executeSettlement(id) {
+                r.escrowedQty = 0;
+                r.status = Status.Closed;
+                emit RepoClosed(id, r.repurchase, r.collateralQty);
+                return;
+            } catch {
+                // Fall through to default. The borrower looked good on paper and the settlement
+                // still failed, so the lender takes the collateral rather than this reverting.
+                _settleDefault(id, "settlement reverted, collateral to lender");
+                return;
+            }
         }
 
-        // Both legs in a single self-call so the EVM rolls back both if either fails.
-        // No partial settlement: cash cannot move without collateral following.
-        try this._executeSettlement(id) {
-            r.status = Status.Closed;
-            emit RepoClosed(id, r.repurchase, r.collateralQty);
-        } catch Error(string memory reason) {
-            r.status = Status.Defaulted;
-            emit RepoDefaulted(id, reason);
+        _settleDefault(id, "repurchase amount not available at maturity");
+    }
+
+    /// @dev Terminal default path. MUST NOT REVERT: a scheduled transaction fires once and never
+    ///      retries, so a revert here is a settlement that silently did not happen. Unlike the
+    ///      old hold-based design, default now has to MOVE the collateral, because it is sitting
+    ///      in this contract rather than already with the lender. If that move fails the repo is
+    ///      still marked Defaulted and `escrowedQty` stays non-zero, which is the signal for
+    ///      `claimCollateral` to retry.
+    function _settleDefault(bytes32 id, string memory reason) internal {
+        Repo storage r = repos[id];
+        r.status = Status.Defaulted;
+
+        uint256 qty = r.escrowedQty;
+        if (qty == 0) { emit RepoDefaulted(id, reason); return; }
+
+        try IERC20(r.security).transfer(r.lender, qty) returns (bool ok) {
+            if (ok) {
+                r.escrowedQty = 0;
+                emit RepoDefaulted(id, reason);
+            } else {
+                emit RepoDefaulted(id, "collateral transfer returned false, call claimCollateral");
+            }
         } catch {
-            r.status = Status.Defaulted;
-            emit RepoDefaulted(id, "settlement reverted");
+            emit RepoDefaulted(id, "collateral transfer reverted, call claimCollateral");
         }
+    }
+
+    /// @notice Retry a collateral delivery that failed during a terminal settlement.
+    /// @dev Permissionless and destination-fixed: a Defaulted repo can only pay the lender, a
+    ///      Closed one only the borrower. Nobody can redirect it, so anyone may trigger it. This
+    ///      exists because escrowed collateral would otherwise be stranded in this contract if a
+    ///      compliance check blocked the recipient at the moment the schedule fired.
+    function claimCollateral(bytes32 id) external {
+        Repo storage r = repos[id];
+        if (r.status != Status.Closed && r.status != Status.Defaulted) revert NotTerminal(id);
+
+        uint256 qty = r.escrowedQty;
+        if (qty == 0) revert NothingEscrowed(id);
+
+        address to = r.status == Status.Defaulted ? r.lender : r.borrower;
+        r.escrowedQty = 0;
+        if (!IERC20(r.security).transfer(to, qty)) revert SecurityLegFailed();
+        emit CollateralClaimed(id, to, qty);
     }
 
     /// @dev Internal sub-call from closeRepo; atomic leg settlement, preserves closeRepo state.
@@ -380,16 +400,11 @@ contract TenorSettlement is EIP712 {
         if (msg.sender != address(this)) revert InternalOnly();
         Repo storage r = repos[id];
 
-        bool ok = IERC20(r.cash).transferFrom(r.borrower, r.lender, r.repurchase);
-        if (!ok) revert CashLegFailed();
+        // Cash borrower -> lender.
+        if (!IERC20(r.cash).transferFrom(r.borrower, r.lender, r.repurchase)) revert CashLegFailed();
 
-        IHoldByPartition(r.security).executeHoldByPartition(
-            IHoldByPartition.HoldIdentifier({
-                partition: r.partition, tokenHolder: r.lender, holdId: r.closeHoldId
-            }),
-            r.borrower,
-            r.collateralQty
-        );
+        // Collateral out of escrow, back to the borrower.
+        if (!IERC20(r.security).transfer(r.borrower, r.collateralQty)) revert SecurityLegFailed();
     }
 
     /// @notice Repurchase before maturity and take the collateral back early.
@@ -411,15 +426,9 @@ contract TenorSettlement is EIP712 {
         if (r.status != Status.Open) revert NotOpen(id);
 
         if (!IERC20(r.cash).transferFrom(r.borrower, r.lender, r.repurchase)) revert CashLegFailed();
+        if (!IERC20(r.security).transfer(r.borrower, r.collateralQty)) revert SecurityLegFailed();
 
-        IHoldByPartition(r.security).executeHoldByPartition(
-            IHoldByPartition.HoldIdentifier({
-                partition: r.partition, tokenHolder: r.lender, holdId: r.closeHoldId
-            }),
-            r.borrower,
-            r.collateralQty
-        );
-
+        r.escrowedQty = 0;
         r.status = Status.Closed;
         emit RepoRepaidEarly(id, uint64(block.timestamp), r.maturity);
         emit RepoClosed(id, r.repurchase, r.collateralQty);

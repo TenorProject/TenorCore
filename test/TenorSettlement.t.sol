@@ -3,101 +3,89 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {TenorSettlement} from "../src/TenorSettlement.sol";
-import {MockATS} from "../src/mocks/MockATS.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
 import {IHederaScheduleService, HSS} from "../src/interfaces/IHederaScheduleService.sol";
 
 /*
- * TenorSettlement test suite
+ * TenorSettlement test suite - ESCROW MODEL
  *
- * This file is written to double as the TESTNET RUNBOOK. Every test says what it proves and what
- * the equivalent step is against the real deployment, so the same sequence can be walked by hand
- * on Hedera testnet.
+ * Written to double as the TESTNET RUNBOOK. Every test says what it proves and what the
+ * equivalent step is against the real deployment.
  *
- * WHAT IS MOCKED HERE, AND WHAT REPLACES IT ON TESTNET
+ * CUSTODY MODEL UNDER TEST
+ *   open      cash     lender   -> borrower
+ *             security borrower -> THIS CONTRACT (escrow)
+ *   repayEarly / closeRepo funded
+ *             cash     borrower -> lender
+ *             security escrow   -> borrower
+ *   closeRepo unfunded
+ *             security escrow   -> lender      <-- default now MOVES tokens
  *
- *   MockERC20   -> USDC. On Hedera, USDC is an HTS token reached through the ERC-20 facade.
- *                  Same interface, so the contract code is identical; only the address changes.
- *                  Remember: accounts must be ASSOCIATED with an HTS token before they can
- *                  receive it. There is no association step locally.
+ * WHAT IS MOCKED, AND WHAT REPLACES IT ON TESTNET
+ *   MockERC20 (cash)     -> USDC, an HTS token through the ERC-20 facade at 0x167. Accounts
+ *                           must be ASSOCIATED with an HTS token before receiving it. No local
+ *                           equivalent, so stage 2 hides nothing here but association.
+ *   MockERC20 (security) -> the ATS diamond's ERC-20 facet. VERIFIED on testnet: approve and
+ *                           allowance behave exactly as ERC-20. The diamond also enforces
+ *                           compliance on transfer, which the mock does not: THIS CONTRACT must
+ *                           itself pass isVerified to receive collateral into escrow.
+ *   vm.mockCall          -> HIP-1215 at 0x16b, which does not exist in forge's EVM. Scheduling
+ *                           is the ONE THING these tests cannot prove. Proven on testnet:
+ *                           schedule 0.0.10474468 executed 25.8 ms after its target second.
+ *   `scheduler`          -> the network invoking closeRepo. closeRepo has no access control
+ *                           because a scheduled execution has no EOA sender.
  *
- *   MockATS     -> the Asset Tokenization Studio diamond. Models the part that matters:
- *                  total = available + held, holds are created out of available balance, and
- *                  only the escrow can execute one.
- *
- *   vm.mockCall -> the HIP-1215 schedule service at 0x16b. It does not exist in forge's local
- *                  EVM, so scheduling is faked here and is the ONE THING these tests cannot
- *                  prove. It is proven separately on testnet by ScheduleProbe
- *                  (schedule 0.0.10393574, 134 ms drift).
- *
- *   `scheduler` -> stands in for the network invoking closeRepo. On testnet you can call
- *                  closeRepo manually from any account to exercise the logic without waiting for
- *                  maturity, then do the real scheduled run once as the final proof.
- *
- * WHAT THESE TESTS PROVE: branch logic and access control.
- * WHAT THEY DO NOT PROVE: that ATS accepts our hold calls, that HTS transfers behave, or that
- * the network fires the schedule. All three are testnet-only.
+ * WHAT THESE PROVE: branch logic, access control, and that no path can strand value silently.
+ * WHAT THEY DO NOT PROVE: ATS compliance behaviour, HTS association, schedule firing.
  */
 contract TenorSettlementTest is Test {
     TenorSettlement settlement;
-    MockATS ats;      // stands in for the ATS bond diamond
-    MockERC20 usdc;   // stands in for USDC (HTS token on testnet)
+    MockERC20 bond;   // the security, escrowed by the contract for the term
+    MockERC20 usdc;   // the cash leg
 
-    // The lender must be a key we control, because they SIGN quotes off-chain.
-    // On testnet this is a real ECDSA account whose key you hold.
     uint256 lenderPk = 0xA11CE;
     address lender;
-
-    // Borrower sends the transactions. No signing required from them.
     address borrower = address(0xB0B);
-
-    // Stands in for the Hedera network invoking the scheduled call.
     address scheduler;
-
-    // A third party with no role, used to prove access control.
     address stranger;
 
-    bytes32 constant PARTITION = bytes32(uint256(1));
-    uint256 constant QTY        = 100e18;    // 100 bond units
-    uint256 constant PRINCIPAL  = 100_000e6; // 100,000 USDC (6 dp)
-    uint256 constant REPURCHASE = 100_096e6; // ~5% annualised over 7 days
+    bytes32 constant PARTITION  = bytes32(uint256(1));
+    uint256 constant QTY        = 100e18;
+    uint256 constant PRINCIPAL  = 100_000e6;
+    uint256 constant REPURCHASE = 100_096e6;
     bytes32 constant REQ        = keccak256("request-1");
     uint64  constant TERM       = 7 days;
 
     /*
-     * SETUP == the one-time on-boarding both parties do on testnet.
-     *
-     *   1. deploy TenorSettlement WITH HBAR. It is the payer for every scheduled unwind
-     *      (~0.12 HBAR each), and openRepo reverts if the balance is below MIN_HBAR_PER_REPO.
-     *   2. borrower holds the bond; lender holds USDC.
-     *   3. lender approves USDC to the settlement contract ONCE. This is the standing
-     *      allowance that makes signature-only quoting possible. There is no EIP-2612 permit
-     *      on HTS, so this transaction is unavoidable.
-     *   4. borrower authorises the settlement contract as an ATS OPERATOR, so openRepo can
-     *      create their hold for them. The mock does not enforce this; ATS does. Do not skip
-     *      it on testnet or createHoldFromByPartition will revert.
+     * SETUP == the one-time onboarding each party does on testnet. ONE approval each.
+     *   1. deploy TenorSettlement WITH HBAR: it pays for every scheduled unwind, and openRepo
+     *      reverts below MIN_HBAR_PER_REPO.
+     *   2. borrower holds the bond and approves it to the settlement contract.
+     *   3. lender holds USDC and approves it to the settlement contract.
+     * The lender needs NO approval on the bond in this model. That is the whole point of it.
      */
     function setUp() public {
         lender    = vm.addr(lenderPk);
-        scheduler = makeAddr("scheduler"); // stands in for the network firing the schedule
-        stranger  = makeAddr("stranger");  // no role in the trade, used for access-control tests
+        scheduler = makeAddr("scheduler");
+        stranger  = makeAddr("stranger");
 
         settlement = new TenorSettlement{value: 1 ether}();
-        ats  = new MockATS();
+        bond = new MockERC20();
         usdc = new MockERC20();
 
-        ats.mint(borrower, QTY);            // borrower owns the bond
-        usdc.mint(lender, PRINCIPAL);       // lender has cash to lend
-        usdc.mint(borrower, REPURCHASE);    // borrower can afford the repurchase later
+        bond.mint(borrower, QTY);
+        usdc.mint(lender, PRINCIPAL);
+        usdc.mint(borrower, REPURCHASE);
 
         vm.prank(lender);
         usdc.approve(address(settlement), type(uint256).max);
 
+        vm.prank(borrower);
+        bond.approve(address(settlement), type(uint256).max);
+
         _mockScheduleService();
     }
 
-    /// Fakes 0x16b: capacity always available, scheduleCall always returns SUCCESS (22).
-    /// On testnet this is real and neither is guaranteed.
     function _mockScheduleService() internal {
         vm.mockCall(
             HSS,
@@ -115,13 +103,12 @@ contract TenorSettlementTest is Test {
     // HELPERS
     // =====================================================================================
 
-    /// The agreed terms. On testnet you build this JSON off-chain and the lender signs it.
     function _quote() internal view returns (TenorSettlement.Quote memory q) {
         q = TenorSettlement.Quote({
             requestId:     REQ,
             lender:        lender,
             borrower:      borrower,
-            security:      address(ats),
+            security:      address(bond),
             partition:     PARTITION,
             collateralQty: QTY,
             cash:          address(usdc),
@@ -133,14 +120,10 @@ contract TenorSettlementTest is Test {
         });
     }
 
-    /// Signs the EIP-712 digest the contract itself computes, so the test and the chain can
-    /// never disagree about encoding. Off-chain tooling should call hashQuote the same way.
-    ///
     /// GOTCHA: this makes an EXTERNAL call to settlement.hashQuote(). vm.prank and
     /// vm.expectRevert apply to the NEXT external call, so calling _sign() after either of them
-    /// consumes the cheat and the real call runs unpranked. Always hoist the signature into a
-    /// local first. The same trap exists on testnet in reverse: hashQuote is a view call, so it
-    /// costs nothing and can be read before you build the transaction.
+    /// consumes the cheat and the real call runs unpranked. ALWAYS hoist the signature into a
+    /// local first. This cost an hour once already.
     function _sign(TenorSettlement.Quote memory q, uint256 pk) internal view returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, settlement.hashQuote(q));
         return abi.encodePacked(r, s, v);
@@ -148,207 +131,204 @@ contract TenorSettlementTest is Test {
 
     function _openValid() internal returns (TenorSettlement.Quote memory q) {
         q = _quote();
-        bytes memory sig = _sign(q, lenderPk); // hoisted: see the GOTCHA on _sign
+        bytes memory sig = _sign(q, lenderPk); // hoisted: see GOTCHA on _sign
         vm.prank(borrower);
         settlement.openRepo(q, sig);
     }
 
-    /// Borrower approves the repurchase amount. On testnet this is a separate transaction the
-    /// borrower must remember to send before maturity, or the repo defaults.
     function _borrowerFundsRepurchase() internal {
         vm.prank(borrower);
         usdc.approve(address(settlement), REPURCHASE);
     }
 
+    function _status(bytes32 id) internal view returns (TenorSettlement.Status st) {
+        ( , , , , , , , , , , , , st) = settlement.repos(id);
+    }
+
+    function _escrowed(bytes32 id) internal view returns (uint256 q) {
+        ( , , , , , , , , , , q, , ) = settlement.repos(id);
+    }
+
     // =====================================================================================
-    // 1. openRepo — SUCCESS
+    // 1. openRepo - SUCCESS
     // =====================================================================================
 
     /*
-     * Proves: a valid signed quote crosses BOTH legs in ONE transaction.
+     * Proves: BOTH legs cross in ONE transaction, and the collateral lands in ESCROW rather
+     * than with the lender.
      *
-     * Testnet: lender signs the quote off-chain and sends it to the borrower by any means.
-     * Borrower sends one transaction. Afterwards check on HashScan that the USDC transfer and
-     * the two hold operations all appear in the SAME transaction record.
+     * Testnet: check on HashScan that the USDC transfer and the bond transfer appear in the
+     * SAME transaction record, and that the bond balance of TenorSettlement went up.
      */
     function test_open_success_crossesBothLegsAtomically() public {
         _openValid();
 
-        // cash moved lender -> borrower
-        assertEq(usdc.balanceOf(lender), 0, "lender paid out the principal");
-        assertEq(usdc.balanceOf(borrower), REPURCHASE + PRINCIPAL, "borrower received the principal");
+        assertEq(usdc.balanceOf(borrower), REPURCHASE + PRINCIPAL, "borrower did not receive cash");
+        assertEq(usdc.balanceOf(lender), 0, "lender cash did not leave");
 
-        // collateral moved borrower -> lender, and is LOCKED in the return-leg hold
-        assertEq(ats.available(borrower), 0, "borrower gave up the collateral");
-        assertEq(ats.held(lender), QTY, "lender holds it, but cannot move it during the term");
-        assertEq(ats.available(lender), 0, "collateral is held, not freely transferable");
+        assertEq(bond.balanceOf(borrower), 0, "collateral did not leave the borrower");
+        assertEq(bond.balanceOf(address(settlement)), QTY, "collateral is not in escrow");
+        assertEq(bond.balanceOf(lender), 0, "lender must NOT hold the security during the term");
+
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Open), "status");
+        assertEq(_escrowed(REQ), QTY, "escrowedQty not recorded");
     }
 
-    /*
-     * Proves: the repo is recorded as Open and the schedule address was captured, so the
-     * pending settlement is inspectable.
-     *
-     * Testnet: read repos(REQ) and look the scheduleAddress up on HashScan. A pending schedule
-     * with a future expiry IS the demo shot.
-     */
-    function test_open_success_recordsOpenRepoAndSchedule() public {
+    function test_open_success_recordsScheduleAddress() public {
         _openValid();
-        ( , , , , , , , , , , , address scheduleAddress, TenorSettlement.Status status) =
-            settlement.repos(REQ);
-        assertEq(uint8(status), uint8(TenorSettlement.Status.Open), "status is Open");
-        assertTrue(scheduleAddress != address(0), "schedule address recorded");
+        ( , , , , , , , , , , , address sched, ) = settlement.repos(REQ);
+        assertEq(sched, address(0x5CADD1E), "schedule address not recorded");
     }
 
     // =====================================================================================
-    // 2. openRepo — FAILURE
+    // 2. openRepo - FAILURES. Reverting here is safe: nothing has moved.
     // =====================================================================================
 
-    /*
-     * Proves: a quote signed by anyone other than q.lender is rejected.
-     * This is the whole security of the RFQ design: terms cannot be forged.
-     */
-    function test_open_fail_signedByWrongKey() public {
-        TenorSettlement.Quote memory q = _quote();
-        bytes memory forged = _sign(q, 0xBADBAD); // not the lender
-        vm.prank(borrower);
-        vm.expectRevert();
-        settlement.openRepo(q, forged);
-        assertEq(usdc.balanceOf(lender), PRINCIPAL, "nothing moved");
-    }
-
-    /*
-     * Proves: a borrower cannot take a legitimately signed quote and improve the terms.
-     * The lender signed repurchase = REPURCHASE; lowering it invalidates the signature.
-     * This is the attack the signature exists to stop.
-     */
-    function test_open_fail_tamperedTerms() public {
-        TenorSettlement.Quote memory q = _quote();
-        bytes memory sig = _sign(q, lenderPk);    // signature over the HONEST quote
-        q.repurchase = PRINCIPAL;                 // borrower now tries to owe no interest
-        vm.prank(borrower);
-        vm.expectRevert();
-        settlement.openRepo(q, sig);
-    }
-
-    /// Proves: only the borrower named in the quote can execute it.
     function test_open_fail_wrongCaller() public {
         TenorSettlement.Quote memory q = _quote();
-        bytes memory sig = _sign(q, lenderPk); // hoisted: see the GOTCHA on _sign
-        vm.prank(stranger);
+        bytes memory sig = _sign(q, lenderPk); // hoisted BEFORE the cheatcodes
         vm.expectRevert();
+        vm.prank(stranger);
         settlement.openRepo(q, sig);
     }
 
-    /*
-     * Proves: a stale quote cannot be executed. Keep quoteExpiry short on testnet: the lender's
-     * allowance is standing, so an old quote is a free option against a price they may no
-     * longer want.
-     */
-    function test_open_fail_expiredQuote() public {
+    function test_open_fail_replaySameRequestId() public {
+        TenorSettlement.Quote memory q = _openValid();
+        bytes memory sig = _sign(q, lenderPk);
+        vm.expectRevert();
+        vm.prank(borrower);
+        settlement.openRepo(q, sig);
+    }
+
+    function test_open_fail_quoteExpired() public {
         TenorSettlement.Quote memory q = _quote();
         bytes memory sig = _sign(q, lenderPk);
         vm.warp(block.timestamp + 11 minutes);
-        vm.prank(borrower);
         vm.expectRevert();
+        vm.prank(borrower);
         settlement.openRepo(q, sig);
     }
 
-    /// Proves: a lender can withdraw a quote before it expires, and it stops working immediately.
-    function test_open_fail_cancelledQuote() public {
+    function test_open_fail_quoteCancelledByLender() public {
         TenorSettlement.Quote memory q = _quote();
         bytes memory sig = _sign(q, lenderPk);
         vm.prank(lender);
         settlement.cancelQuote(REQ);
-        vm.prank(borrower);
         vm.expectRevert();
+        vm.prank(borrower);
         settlement.openRepo(q, sig);
     }
 
-    /// Proves: the same signed quote cannot be executed twice. requestId is the replay guard.
-    function test_open_fail_replay() public {
-        TenorSettlement.Quote memory q = _openValid();
-        bytes memory sig = _sign(q, lenderPk); // hoisted: see the GOTCHA on _sign
-        vm.prank(borrower);
+    /*
+     * Proves the security beat: a borrower cannot improve the terms after the lender signed.
+     * Testnet: edit the repurchase amount downward in your tooling and watch it revert.
+     */
+    function test_open_fail_tamperedQuote() public {
+        TenorSettlement.Quote memory q = _quote();
+        bytes memory sig = _sign(q, lenderPk);
+        q.repurchase = PRINCIPAL; // borrower tries to pay back less
         vm.expectRevert();
+        vm.prank(borrower);
         settlement.openRepo(q, sig);
     }
 
-    // =====================================================================================
-    // 3. repayEarly
-    // =====================================================================================
-
-    /*
-     * Proves: the borrower can buy the collateral back before maturity by paying the FULL
-     * repurchase amount. No rebate, so the lender is strictly better off and their consent is
-     * not required.
-     *
-     * Testnet: borrower approves REPURCHASE, then calls repayEarly. Collateral should return
-     * immediately without waiting for the schedule.
-     */
-    function test_repayEarly_success() public {
-        _openValid();
-        _borrowerFundsRepurchase();
-
-        vm.prank(borrower);
-        settlement.repayEarly(REQ);
-
-        assertEq(ats.available(borrower), QTY, "collateral returned early");
-        assertEq(ats.held(lender), 0, "lender's hold released");
-        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender paid in full, no rebate");
-    }
-
-    /*
-     * Proves: repayEarly REVERTS when the borrower has not funded it.
-     *
-     * This is deliberately the opposite of closeRepo. repayEarly is caller-initiated and atomic,
-     * so a failure must be reported. Silently marking a borrower in default on a repo they were
-     * actively trying to settle would be wrong.
-     */
-    function test_repayEarly_fail_notFunded() public {
-        _openValid();                       // no approval given
-        vm.prank(borrower);
+    function test_open_fail_signedByWrongKey() public {
+        TenorSettlement.Quote memory q = _quote();
+        bytes memory sig = _sign(q, 0xBADBAD);
         vm.expectRevert();
-        settlement.repayEarly(REQ);
-
-        assertEq(ats.held(lender), QTY, "collateral untouched");
+        vm.prank(borrower);
+        settlement.openRepo(q, sig);
     }
 
-    /// Proves: only the borrower can repay. A lender cannot force an early unwind.
-    function test_repayEarly_fail_wrongCaller() public {
-        _openValid();
-        _borrowerFundsRepurchase();
+    function test_open_fail_maturityInPast() public {
+        TenorSettlement.Quote memory q = _quote();
+        q.maturity = uint64(block.timestamp - 1);
+        bytes memory sig = _sign(q, lenderPk);
+        vm.expectRevert();
+        vm.prank(borrower);
+        settlement.openRepo(q, sig);
+    }
+
+    /// The contract pays for its own scheduled unwinds. Below the floor it must refuse to open
+    /// a trade it cannot afford to settle. Testnet: drain with sweep() and retry.
+    function test_open_fail_insufficientHbar() public {
+        TenorSettlement poor = new TenorSettlement();
+        TenorSettlement.Quote memory q = _quote();
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(lenderPk, poor.hashQuote(q));
+        bytes memory sig = abi.encodePacked(r, s, v);
+        vm.expectRevert();
+        vm.prank(borrower);
+        poor.openRepo(q, sig);
+    }
+
+    /// The borrower's single approval is what makes the escrow pull work. Without it, nothing.
+    function test_open_fail_borrowerHasNotApprovedSecurity() public {
+        vm.prank(borrower);
+        bond.approve(address(settlement), 0);
+
+        TenorSettlement.Quote memory q = _quote();
+        bytes memory sig = _sign(q, lenderPk);
+        vm.expectRevert();
+        vm.prank(borrower);
+        settlement.openRepo(q, sig);
+    }
+
+    function test_open_fail_lenderHasNoCash() public {
         vm.prank(lender);
+        usdc.approve(address(settlement), 0);
+
+        TenorSettlement.Quote memory q = _quote();
+        bytes memory sig = _sign(q, lenderPk);
         vm.expectRevert();
-        settlement.repayEarly(REQ);
+        vm.prank(borrower);
+        settlement.openRepo(q, sig);
     }
 
-    /// Proves: a settled repo cannot be repaid again.
-    function test_repayEarly_fail_alreadyClosed() public {
+    // =====================================================================================
+    // 3. repayEarly - caller-initiated, SHOULD revert on failure
+    // =====================================================================================
+
+    function test_repayEarly_success_returnsCollateralAndPaysLender() public {
         _openValid();
         _borrowerFundsRepurchase();
-        vm.startPrank(borrower);
+
+        vm.prank(borrower);
         settlement.repayEarly(REQ);
+
+        assertEq(bond.balanceOf(borrower), QTY, "collateral not returned");
+        assertEq(bond.balanceOf(address(settlement)), 0, "escrow not emptied");
+        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender not paid in full");
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Closed), "status");
+        assertEq(_escrowed(REQ), 0, "escrowedQty not cleared");
+    }
+
+    function test_repayEarly_fail_notBorrower() public {
+        _openValid();
+        _borrowerFundsRepurchase();
         vm.expectRevert();
+        vm.prank(stranger);
         settlement.repayEarly(REQ);
-        vm.stopPrank();
+    }
+
+    function test_repayEarly_fail_repoNotOpen() public {
+        vm.expectRevert();
+        vm.prank(borrower);
+        settlement.repayEarly(keccak256("never-opened"));
+    }
+
+    /// Opposite policy to closeRepo ON PURPOSE: a human is here to retry, so tell them.
+    function test_repayEarly_fail_revertsWhenUnfunded() public {
+        _openValid(); // no approval for the repurchase
+        vm.expectRevert();
+        vm.prank(borrower);
+        settlement.repayEarly(REQ);
     }
 
     // =====================================================================================
-    // 4. closeRepo — invoked by `scheduler`, standing in for the network
+    // 4. closeRepo - invoked by the NETWORK. Must never revert.
     // =====================================================================================
 
-    /*
-     * Proves: at maturity, a funded repo settles both legs back.
-     *
-     * `scheduler` is an ordinary account here on purpose: closeRepo has NO access control,
-     * because a scheduled execution has no EOA sender. Anyone being able to call it is a
-     * property of the design, not an oversight.
-     *
-     * Testnet: call closeRepo manually from any account first to prove the logic, THEN do one
-     * real run where the network fires it at maturity with nobody online. The second one is the
-     * demo.
-     */
-    function test_close_success_repurchaseAtMaturity() public {
+    function test_close_funded_returnsCollateralToBorrower() public {
         _openValid();
         _borrowerFundsRepurchase();
         vm.warp(block.timestamp + TERM);
@@ -356,84 +336,181 @@ contract TenorSettlementTest is Test {
         vm.prank(scheduler);
         settlement.closeRepo(REQ);
 
-        assertEq(ats.available(borrower), QTY, "collateral returned to borrower");
-        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender received the repurchase amount");
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Closed), "status");
+        assertEq(bond.balanceOf(borrower), QTY, "collateral not returned to borrower");
+        assertEq(bond.balanceOf(address(settlement)), 0, "escrow not emptied");
+        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender not paid");
+        assertEq(_escrowed(REQ), 0, "escrowedQty not cleared");
     }
 
     /*
-     * Proves: an unfunded repo DEFAULTS instead of reverting, and the lender keeps the
-     * collateral they already hold.
+     * THE BRANCH THAT PROVES THE SETTLEMENT GUARANTEE.
+     * Unfunded at maturity: the lender takes the collateral. Unlike the old hold-based design
+     * this MOVES tokens, so the transfer has to work inside a function that must not revert.
      *
-     * This is the branch that makes the settlement guarantee real. A scheduled call fires once
-     * and is never retried, so a revert here would be a settlement that silently never happened.
-     * Defaulting is a correct outcome, not a failure.
+     * Testnet: skip the borrower's approval, wait for the schedule, expect status 3 and a
+     * SUCCESS result on the scheduled transaction.
      */
-    function test_close_default_borrowerNeverFunded() public {
-        _openValid();                       // borrower never approves
+    function test_close_unfunded_transfersCollateralToLender() public {
+        _openValid();
         vm.warp(block.timestamp + TERM);
 
         vm.prank(scheduler);
-        settlement.closeRepo(REQ);          // must NOT revert
+        settlement.closeRepo(REQ); // must not revert
 
-        assertEq(ats.held(lender), QTY, "lender keeps the collateral");
-        assertEq(ats.available(borrower), 0, "borrower gets nothing back");
-        assertEq(usdc.balanceOf(lender), 0, "no cash moved");
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Defaulted), "status");
+        assertEq(bond.balanceOf(lender), QTY, "lender did not receive the collateral");
+        assertEq(bond.balanceOf(address(settlement)), 0, "escrow not emptied");
+        assertEq(usdc.balanceOf(lender), 0, "no cash should have moved");
+        assertEq(_escrowed(REQ), 0, "escrowedQty not cleared");
     }
 
-    /*
-     * Proves: closeRepo does not revert even when the SECURITY leg fails after cash has moved.
-     * Worst case in the whole contract: borrower has paid, lender still holds the bond. We
-     * record it loudly rather than throwing away the settlement.
-     */
-    function test_close_neverReverts_whenSecurityLegFails() public {
+    /// Balance present but allowance pulled: still a default, still no revert.
+    function test_close_allowanceRevokedBeforeMaturity_defaults() public {
         _openValid();
         _borrowerFundsRepurchase();
-        ats.setFailExecute(true);
+        vm.prank(borrower);
+        usdc.approve(address(settlement), 0);
         vm.warp(block.timestamp + TERM);
 
         vm.prank(scheduler);
-        settlement.closeRepo(REQ);          // must NOT revert
+        settlement.closeRepo(REQ);
+
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Defaulted), "status");
+        assertEq(bond.balanceOf(lender), QTY, "lender did not get collateral");
     }
 
-    /// Proves: calling closeRepo twice is a quiet no-op, not a double settlement.
+    /// Looked funded, settlement still failed. Must fall through to default, not revert.
+    function test_close_settlementLegFails_fallsThroughToDefault() public {
+        _openValid();
+        _borrowerFundsRepurchase();
+        vm.warp(block.timestamp + TERM);
+
+        bond.setFailTransfer(true);
+        vm.prank(scheduler);
+        settlement.closeRepo(REQ); // must not revert
+
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Defaulted), "status");
+        // Collateral could not move either way, so it is stranded and flagged for recovery.
+        assertEq(_escrowed(REQ), QTY, "escrowedQty should still flag stranded collateral");
+        assertEq(bond.balanceOf(address(settlement)), QTY, "collateral should still be here");
+    }
+
+    /*
+     * THE WORST CASE, AND IT MUST NOT REVERT.
+     * The security refuses to move to the lender at the exact moment the schedule fires, e.g.
+     * because the lender failed a compliance check. The repo still settles as Defaulted, and
+     * the collateral is recoverable afterwards rather than stuck forever.
+     */
+    function test_close_collateralTransferReverts_stillDefaultsWithoutReverting() public {
+        _openValid();
+        vm.warp(block.timestamp + TERM);
+
+        bond.setFailTransfer(true);
+        vm.prank(scheduler);
+        settlement.closeRepo(REQ); // must not revert
+
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Defaulted), "status");
+        assertEq(_escrowed(REQ), QTY, "stranded collateral must stay flagged");
+    }
+
+    function test_close_collateralTransferReturnsFalse_stillDefaults() public {
+        _openValid();
+        vm.warp(block.timestamp + TERM);
+
+        bond.setTransferReturnsFalse(true);
+        vm.prank(scheduler);
+        settlement.closeRepo(REQ);
+
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Defaulted), "status");
+        assertEq(_escrowed(REQ), QTY, "a silent false must not clear the flag");
+    }
+
+    /// A scheduled transaction fires ONCE and never retries, but a manual double-call must be
+    /// harmless. Also what makes repayEarly safe.
     function test_close_isIdempotent() public {
         _openValid();
-        _borrowerFundsRepurchase();
         vm.warp(block.timestamp + TERM);
 
-        vm.startPrank(scheduler);
+        vm.prank(scheduler);
         settlement.closeRepo(REQ);
-        settlement.closeRepo(REQ);
-        vm.stopPrank();
+        uint256 lenderBond = bond.balanceOf(lender);
 
-        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender not paid twice");
-        assertEq(ats.available(borrower), QTY, "collateral not returned twice");
+        vm.prank(stranger);
+        settlement.closeRepo(REQ); // no-op, no revert
+
+        assertEq(bond.balanceOf(lender), lenderBond, "second call moved tokens");
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Defaulted), "status changed");
     }
 
-    /*
-     * Proves: after early repayment the orphaned schedule is harmless.
-     *
-     * repayEarly leaves the scheduled call in place. At maturity the network fires it, it finds
-     * a closed repo and returns. It costs the contract one execution fee (~0.12 HBAR) to do
-     * nothing. This is why the status guard is the first line of closeRepo.
-     */
-    function test_close_isNoOpAfterEarlyRepayment() public {
+    /// After repayEarly the orphaned schedule still fires. It must do nothing at all.
+    function test_close_afterRepayEarly_isHarmlessNoOp() public {
         _openValid();
         _borrowerFundsRepurchase();
         vm.prank(borrower);
         settlement.repayEarly(REQ);
 
+        uint256 borrowerBond = bond.balanceOf(borrower);
         vm.warp(block.timestamp + TERM);
         vm.prank(scheduler);
         settlement.closeRepo(REQ);
 
-        assertEq(ats.available(borrower), QTY, "nothing moved twice");
-        assertEq(usdc.balanceOf(lender), REPURCHASE, "lender not paid twice");
+        assertEq(bond.balanceOf(borrower), borrowerBond, "orphaned schedule moved tokens");
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Closed), "status changed");
     }
 
-    /// Proves: closeRepo on an id that was never opened is a no-op, not a revert.
-    function test_close_unknownIdIsNoOp() public {
+    /// No access control, deliberately: a scheduled execution has no EOA sender. Safe because
+    /// terms are fixed at open and every branch is terminal.
+    function test_close_hasNoAccessControl() public {
+        _openValid();
+        _borrowerFundsRepurchase();
+        vm.warp(block.timestamp + TERM);
+
+        vm.prank(stranger);
+        settlement.closeRepo(REQ);
+
+        assertEq(uint8(_status(REQ)), uint8(TenorSettlement.Status.Closed), "stranger call failed");
+    }
+
+    function test_close_unknownRepo_isNoOp() public {
         vm.prank(scheduler);
-        settlement.closeRepo(keccak256("never-existed"));
+        settlement.closeRepo(keccak256("never-opened")); // must not revert
+    }
+
+    // =====================================================================================
+    // 5. claimCollateral - recovery for stranded escrow
+    // =====================================================================================
+
+    function test_claim_recoversStrandedCollateralToLender() public {
+        _openValid();
+        vm.warp(block.timestamp + TERM);
+
+        bond.setFailTransfer(true);
+        vm.prank(scheduler);
+        settlement.closeRepo(REQ);
+        assertEq(_escrowed(REQ), QTY, "precondition: collateral stranded");
+
+        bond.setFailTransfer(false);   // whatever blocked it is resolved
+        vm.prank(stranger);            // permissionless: destination is fixed by status
+        settlement.claimCollateral(REQ);
+
+        assertEq(bond.balanceOf(lender), QTY, "lender did not receive stranded collateral");
+        assertEq(_escrowed(REQ), 0, "flag not cleared");
+    }
+
+    function test_claim_fail_whenRepoStillOpen() public {
+        _openValid();
+        vm.expectRevert();
+        settlement.claimCollateral(REQ);
+    }
+
+    function test_claim_fail_whenNothingEscrowed() public {
+        _openValid();
+        vm.warp(block.timestamp + TERM);
+        vm.prank(scheduler);
+        settlement.closeRepo(REQ); // succeeds, escrow emptied
+
+        vm.expectRevert();
+        settlement.claimCollateral(REQ);
     }
 }

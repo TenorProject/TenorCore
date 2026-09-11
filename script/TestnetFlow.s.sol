@@ -3,7 +3,6 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {TenorSettlement} from "../src/TenorSettlement.sol";
-import {MockATS} from "../src/mocks/MockATS.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
 
 /**
@@ -16,7 +15,7 @@ import {MockERC20} from "../src/mocks/MockERC20.sol";
  *   forge script script/TestnetFlow.s.sol --sig "closeRepo()"  --rpc-url hedera_testnet --broadcast
  *   forge script script/TestnetFlow.s.sol --sig "repayEarly()" --rpc-url hedera_testnet --broadcast
  *
- * STAGE 1 (this script) uses MockATS and MockERC20 so the ONLY unknown is HIP-1215 scheduling,
+ * STAGE 1 (this script) uses MockERC20 for BOTH legs so the ONLY unknown is HIP-1215 scheduling,
  * which is the thing forge test cannot prove. Do not skip to the real bond: if you swap both the
  * securities layer and the scheduling layer at once and it fails, you will not know which broke.
  *
@@ -47,26 +46,32 @@ contract TestnetFlow is Script {
         // MIN_HBAR_PER_REPO (30_000_000 == 0.3 HBAR) is denominated in.
         vm.startBroadcast(_lenderPk());
         TenorSettlement settlement = new TenorSettlement{value: 5e18}();
-        MockATS ats   = new MockATS();
-        MockERC20 cash = new MockERC20();
+        MockERC20 security = new MockERC20();   // stands in for the ATS bond's ERC-20 facet
+        MockERC20 cash     = new MockERC20();
 
         cash.mint(lender, PRINCIPAL);
         cash.mint(borrower, REPURCHASE);   // so the borrower can settle later
-        ats.mint(borrower, QTY);
+        security.mint(borrower, QTY);
 
         // The lender's ONE on-chain setup transaction. After this they only ever sign.
         cash.approve(address(settlement), type(uint256).max);
         vm.stopBroadcast();
 
+        // The borrower's ONE on-chain setup transaction: approve the collateral so openRepo can
+        // pull it into escrow. In the escrow model the lender needs NO approval on the security.
+        vm.broadcast(_borrowerPk());
+        security.approve(address(settlement), type(uint256).max);
+
         console.log("TENOR_SETTLEMENT=", address(settlement));
-        console.log("SECURITY=", address(ats));
+        console.log("SECURITY=", address(security));
         console.log("CASH=", address(cash));
         console.log("LENDER=", lender);
         console.log("BORROWER=", borrower);
         console.log("");
         console.log("Put TENOR_SETTLEMENT, SECURITY and CASH in .env, then run openRepo().");
-        console.log("NOTE: MockATS does not enforce operator authorisation. The real ATS bond");
-        console.log("does, so stage 2 needs the borrower to authorise the settlement contract.");
+        console.log("STAGE 2: point SECURITY at the real ATS bond and have the BORROWER call");
+        console.log("approve(TenorSettlement, qty) on it. The contract itself must also pass");
+        console.log("isVerified on the identity registry, because it now RECEIVES the security.");
     }
 
     function _quote() internal view returns (TenorSettlement.Quote memory q) {
