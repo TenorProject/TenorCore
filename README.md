@@ -1,83 +1,144 @@
-# Tenor
+<p align="center">
+  <img src="tenor-logo.svg" alt="Tenor" width="104" />
+</p>
 
-**A repo desk for tokenised securities on Hedera. The trade settles atomically, and the unwind
-settles itself.**
+<h1 align="center">Tenor</h1>
 
-Built for ETHGlobal ETHOnline 2026.
+<p align="center">
+  <b>Compliance-gated lending against tokenised securities on Hedera.<br/>
+  The trade settles atomically, and the unwind settles itself.</b>
+</p>
+
+<p align="center">
+  ETHGlobal ETHOnline 2026 · Hedera "Tokenization of Anything" · Privy
+</p>
+
+---
+
+## The problem
+
+Hedera's Asset Tokenization Studio issues real, compliance-gated securities. It **cannot settle
+them against money**. There are zero `payable` functions across its 104 facets, no
+delivery-versus-payment, and no atomic swap. Its own documentation describes a DvP flow built on a
+"lock hash" that does not exist anywhere in the code.
+
+So a bond issued through ATS can be minted, transferred and frozen, but it cannot be traded against
+cash in one transaction. Tenor is that missing settlement layer.
 
 ## What it does
 
-A repurchase agreement is a loan dressed as a sale: one party sells a bond for cash today and
-agrees to buy it back at a set price on a set date. It has two hard parts. The opening leg must be
-atomic, or one side is briefly exposed. The closing leg must actually happen on the date, and on
-every other chain that means a keeper bot, a cron job or a clearinghouse that can fail on exactly
-the day it matters.
+A borrower posts a tokenised bond as collateral and receives USDC. At maturity they repay and get
+the bond back, or they do not and the lender keeps it. Two hard parts, both solved on-chain:
 
-Tenor hands the closing leg to the network at the moment the trade is struck.
+**The open must be atomic.** Cash and collateral cross in a single contract call. Either both move
+or neither does, so neither side is ever exposed.
 
-- **Open** crosses collateral against USDC in a single contract call. Both legs move or neither does.
-- **The unwind** is created at open as a HIP-1215 scheduled contract call and executed by the Hedera
-  network itself at maturity. Measured drift on testnet: **134 ms** (schedule `0.0.10393574`).
-- **No price oracle, and no margin call.** The haircut agreed at open is the risk control. The
-  trade is over-collateralised from the start, it is short-dated, and if the borrower fails to
-  repurchase the lender simply keeps collateral they already hold. That is how bilateral term repo
-  works, and it means there is no feed to manipulate and nothing to liquidate mid-term. Nothing
-  prices a bond issued last week anyway; pretending otherwise would be the weaker design.
-- **The borrower can repurchase early** at the full agreed amount, with no rebate. The lender
-  receives exactly the return they signed for, sooner, so it needs no consent from them. The
-  pending scheduled settlement then fires at maturity, sees a closed repo, and does nothing.
-- **Compliance is enforced by the token.** The collateral is an ERC-3643 / ERC-1400 security issued
-  through Hedera's Asset Tokenization Studio. A counterparty who is not in the identity registry
-  cannot take delivery, because the transfer itself reverts.
+**The close must actually happen on the date.** On every other chain that means a keeper bot, a
+cron job, or a clearinghouse that can fail on exactly the day it matters. Tenor hands the closing
+leg to the network at the moment the trade is struck, as a HIP-1215 scheduled contract call.
+Nobody runs it. Nobody can forget. Nobody pays for it but the contract itself.
 
-## Why this needed building
+## Proven on Hedera testnet
 
-Asset Tokenization Studio issues compliance-gated securities and **cannot settle them against
-money**. There are zero `payable` functions across its 104 facets, no DvP, and no atomic swap. Its
-own documentation describes a delivery-versus-payment flow built on a "lock hash" that does not
-exist anywhere in the code. The settlement layer in this repo is that missing piece.
+Not claims. Every row is a public transaction.
 
-## Prior art and disclosure
+| What | Evidence |
+|---|---|
+| The network executed our unwind with nobody online | schedule `0.0.10474468`, `executed_timestamp` `1789123560.025816284` |
+| Drift from the requested second | **25.8 ms** |
+| The scheduled execution succeeded, it did not revert | `result: SUCCESS`, `scheduled: true` |
+| **The contract paid its own settlement fee** | 0.0503 HBAR debited from the contract, no user transaction |
+| Atomic open against the **real ATS bond and real USDC** | tx `0xee272d7c6f02972df1b6d2f254c38cf9ea731b53511d2708e80d669382a339bf`, 2,380,918 gas |
+| Independent HIP-1215 measurement | `ScheduleProbe`, schedule `0.0.10393574`, 134 ms |
 
-This project was built from scratch during ETHOnline 2026. No code, configuration or assets from
-any prior project were reused.
+ATS bond: [`0xc2dadb01462b766bb2f58c9638b32e97200ca07d`](https://hashscan.io/testnet/contract/0xc2dadb01462b766bb2f58c9638b32e97200ca07d)
 
-**Alba** ([showcase](https://ethglobal.com/showcase/alba-ma7bi),
-[repo](https://github.com/acollette/alba)) won Hedera's ETHGlobal Lisbon 2026 prize using the
-Hedera Schedule Service to execute a loan maturity leg without a keeper. We reached the same
-underlying primitive independently.
+The default branch is the one worth reading. At maturity, with the borrower unfunded, the network
+called `closeRepo`, it settled as `Defaulted`, the lender took the collateral, and the transaction
+came back **SUCCESS**. A scheduled transaction fires once and never retries, so a revert there
+would be a settlement that silently did not happen. Default is a business outcome, not an error,
+and the contract is written so it can never revert.
 
-*What we share:* the observation that a dated obligation can be created at trade time and executed
-by the network with no off-chain trigger.
+## How the sponsors are used
 
-*What differs:* Alba is crypto-collateralised revolving credit settled on Base, with Hedera acting
-as a scheduling co-processor and Axelar carrying the message back. Tenor is Hedera-native
-end to end and settles a compliance-gated security against cash as delivery versus payment, with an
-identity registry deciding who may take delivery.
+### Hedera
 
-Other prior art reviewed: Asseto (ioBuilders and Hashgraph, closed source, order books and atomic
-DvP on Hedera), Broadridge DLR and JPMorgan Kinexys (institutional tokenised repo on permissioned
-ledgers), Fnality with HQLAˣ (cross-chain intraday repo swap), Term Finance (tri-party repo modelled
-in Solidity, keeper-driven), and the Aberdeen / Lloyds / Archax tokenised collateral trade on Hedera
-under FCA oversight.
+**[`TenorSettlement.openRepo`](https://github.com/TenorProject/TenorCore/blob/83c68b0/src/TenorSettlement.sol#L226-L299)**
 
-This approach was confirmed with ETHGlobal support before the build began.
+One function, three Hedera services, reached three different ways:
+
+- **Asset Tokenization Studio** issues the collateral, an ERC-3643 / ERC-1400 bond we minted
+  ourselves on testnet, and enforces compliance on every movement. ATS requires an identity
+  registry and a compliance module and **ships neither**, so `src/periphery/` implements both.
+  Without them every mint and transfer reverts.
+- **HTS** carries the cash leg through the ERC-20 facade at `0x167`. There is no EIP-2612 `permit`
+  on HTS, so the whole approval flow is designed around a single standing allowance per side.
+- **Schedule Service (HIP-1215)** at `0x16b` is why this exists on Hedera and nowhere else.
+  `scheduleCall` runs inside the same transaction that opens the trade.
+
+### Privy
+
+**[`providers.tsx`](https://github.com/TenorProject/tenor-app/blob/main/src/app/providers.tsx)**
+
+Privy is how both counterparties reach the product. The lender signs an EIP-712 quote off-chain and
+sends **zero transactions**, so the signing surface is the product, and Privy makes it reachable by
+someone who has never held a wallet. We also convert Privy's raw secp256k1 key into Hedera's
+DER-encoded hex so a user can import the same account into HashPack and is never locked into us.
+
+## Design decisions worth defending
+
+**Price discovery is RFQ, not an order book.** Lending against a *specific* security is a specials
+trade, which is why Tradeweb and BrokerTec negotiate them rather than matching them. Lenders sign a
+12-field EIP-712 quote off-chain; the borrower executes the one they accept in one transaction.
+Terms are bound by the signature, so nothing can be substituted or re-priced in flight.
+
+**No price oracle and no margin call.** Deliberate, not skipped. A margin call is only meaningful
+if there is a remedy, and here there is none: collateral is fixed at open and escrowed for the
+term. The haircut agreed at open is the risk control, which is how bilateral term lending actually
+works. Nothing reliably prices a bond minted last week; pretending otherwise would be the weaker
+design and there would be a feed to manipulate.
+
+**Liquidation is the default branch of `closeRepo`, not an engine.**
+
+**Compliance is enforced by the token itself.** A counterparty outside the identity registry cannot
+take delivery, because the transfer reverts inside ATS. Not a check in our UI.
+
+**The collateral is escrowed by the contract**, not delivered to the lender. One approval per side,
+no ERC-1400 hold lifecycle to manage. This is a collateralised loan, not a true-sale repurchase
+agreement, and we describe it as such.
+
+## Architecture
+
+```
+lender ──signs EIP-712 quote (no transaction)──┐
+                                               ▼
+borrower ──openRepo()──►  TenorSettlement  ──► cash   lender → borrower      (HTS, 0x167)
+                                           ──► bond   borrower → escrow      (ATS diamond)
+                                           ──► scheduleCall(closeRepo, maturity)  (0x16b)
+                                                        │
+                          ... term passes, nobody online ...
+                                                        ▼
+                         Hedera executes closeRepo:  repaid → bond back to borrower
+                                                     unpaid → bond to lender
+```
+
+The audit trail runs off-chain in the app, submitting contract events to an HCS topic. HCS has no
+Solidity precompile (HIP-1208 is still an open PR), so it cannot be written from the contract.
 
 ## Repo
 
 | Path | What |
 |---|---|
-| `src/TenorSettlement.sol` | The settlement contract. Open and close. |
-| `src/interfaces/` | Hand-written ATS and HIP-1215 interfaces. |
-| `src/periphery/` | Minimal identity registry and compliance module ATS does not ship. |
+| `src/TenorSettlement.sol` | The settlement contract. Open, close, early repayment, recovery. |
+| `src/interfaces/` | Hand-written ATS and HIP-1215 interfaces, verified against the live ABI. |
+| `src/periphery/` | The identity registry and compliance module ATS requires and does not ship. |
 | `src/probe/ScheduleProbe.sol` | HIP-1215 evidence rig. Rerunnable. |
-| `services/hcs/` | Consensus-service audit trail. HCS is unreachable from Solidity. |
-| `test/TenorSettlement.t.sol` | Test suite, written to double as the testnet runbook. |
+| `test/TenorSettlement.t.sol` | 29 tests, written to double as the testnet runbook. |
 | `script/TestnetFlow.s.sol` | Step-by-step testnet walkthrough, one entrypoint per step. |
-| `TESTNET.md` | How to deploy and test on Hedera testnet. |
-| `IMPLEMENTATION_PLAN.md` | Build plan and the decisions behind it. |
-| `STATUS.md` | What is deployed and what is proven on testnet. |
-| `TOOLING.md` | Dev setup. |
+| `TESTNET.md` | Deploy and test on Hedera testnet, in two stages. |
+| `STATUS.md` | What is deployed and what is proven, with transaction ids. |
+
+Front end and HCS audit trail: **[TenorProject/tenor-app](https://github.com/TenorProject/tenor-app)**
 
 ## Build
 
@@ -86,15 +147,14 @@ forge build
 forge test
 ```
 
-Testnet deployment and the full walkthrough are in **[TESTNET.md](TESTNET.md)**. It runs in two
-stages on purpose: stage 1 uses mock securities and mock cash so the only unknown is HIP-1215
-scheduling, and stage 2 swaps in the real ATS bond. `forge test` cannot reach `0x16b` or `0x167`,
-so neither is proven by a green unit suite.
+`forge test` cannot reach `0x16b` or `0x167`, so a green suite proves branch logic and nothing
+about Hedera. The integration is proven on testnet only; see **[TESTNET.md](TESTNET.md)**.
 
 ## AI assistance
 
-Claude was used for research, prior-art review, and drafting parts of the contracts and docs. All
-Hedera and ATS findings recorded here were verified against source code or against testnet.
+Claude was used for research, design review, and drafting parts of the contracts and docs. Every
+Hedera and ATS claim here was verified against the published v8.0.0 Solidity or against a testnet
+transaction, because both the documentation and the model were wrong in several places.
 
 ## Licence
 
