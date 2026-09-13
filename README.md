@@ -13,6 +13,11 @@
   ETHGlobal ETHOnline 2026 · Hedera "Tokenization of Anything" · Privy
 </p>
 
+<p align="center">
+  <a href="https://tenor-develop.up.railway.app/market">Live demo</a> ·
+  <a href="https://x.com/tenor_protocol">@tenor_protocol</a>
+</p>
+
 ---
 
 ## The problem
