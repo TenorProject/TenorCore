@@ -5,7 +5,7 @@
 <h1 align="center">Tenor</h1>
 
 <p align="center">
-  <b>Compliance-gated lending against tokenised securities on Hedera.<br/>
+  <b>Lending protocol for tokenised securities on Hedera.<br/>
   The trade settles atomically, and the unwind settles itself.</b>
 </p>
 
@@ -44,7 +44,7 @@ From there the borrower has two paths. Repay early with repayEarly, and the bond
 |---|---|
 | **`TenorSettlement`** | [`0x9198Bc6E73F7310Dd2D7160cB91A0937c75ebc22`](https://hashscan.io/testnet/contract/0x9198bc6e73f7310dd2d7160cb91a0937c75ebc22) · `0.0.10475244` |
 | ATS bond (collateral) | [`0xc2dadb01462b766bb2f58c9638b32e97200ca07d`](https://hashscan.io/testnet/contract/0xc2dadb01462b766bb2f58c9638b32e97200ca07d) · `0.0.10391608` |
-| USDC (cash leg) | `0.0.429274`, reached through the HTS ERC-20 facade at `0x167` |
+| USDC (cash leg) | `0.0.429274` (EVM: `0x0000000000000000000000000000000000068cda`) |
 | `ScheduleProbe` | [`0x3102F4Bcba8F781B6d7cf697A5af32EE829A1438`](https://hashscan.io/testnet/contract/0x3102F4Bcba8F781B6d7cf697A5af32EE829A1438) |
 
 ## Proven on Hedera testnet
