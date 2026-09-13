@@ -38,26 +38,35 @@ cron job, or a clearinghouse that can fail on exactly the day it matters. Tenor 
 leg to the network at the moment the trade is struck, as a HIP-1215 scheduled contract call.
 Nobody runs it. Nobody can forget. Nobody pays for it but the contract itself.
 
+## Deployed on Hedera testnet
+
+| What | Address |
+|---|---|
+| **`TenorSettlement`** | [`0x9198Bc6E73F7310Dd2D7160cB91A0937c75ebc22`](https://hashscan.io/testnet/contract/0x9198bc6e73f7310dd2d7160cb91a0937c75ebc22) · `0.0.10475244` |
+| ATS bond (collateral) | [`0xc2dadb01462b766bb2f58c9638b32e97200ca07d`](https://hashscan.io/testnet/contract/0xc2dadb01462b766bb2f58c9638b32e97200ca07d) · `0.0.10391608` |
+| USDC (cash leg) | `0.0.429274`, reached through the HTS ERC-20 facade at `0x167` |
+| `ScheduleProbe` | [`0x3102F4Bcba8F781B6d7cf697A5af32EE829A1438`](https://hashscan.io/testnet/contract/0x3102F4Bcba8F781B6d7cf697A5af32EE829A1438) |
+
 ## Proven on Hedera testnet
 
-Not claims. Every row is a public transaction.
+Not claims. Every row is a public transaction against the **real ATS bond and real USDC**.
 
 | What | Evidence |
 |---|---|
-| The network executed our unwind with nobody online | schedule `0.0.10474468`, `executed_timestamp` `1789123560.025816284` |
+| **Atomic open**: cash and collateral cross in ONE transaction | tx [`0x698e9c3e…01bcfc`](https://hashscan.io/testnet/transaction/0x698e9c3e9a6cea3509c38573004ae86a1c011881c1b14adca45185a2bb01bcfc), `SUCCESS`, 2,007,269 gas |
+| **Early repayment**: cash to the lender, collateral out of escrow, in one call | tx [`0x8c6e16c5…0140e0`](https://hashscan.io/testnet/transaction/0x8c6e16c5860075a34b9bc0124d99521b79eee21552722a2d978680d4eb0140e0), `SUCCESS`, 303,658 gas |
+| **The network executed our unwind with nobody online** | schedule `0.0.10474468`, `executed_timestamp` `1789123560.025816284` |
 | Drift from the requested second | **25.8 ms** |
 | The scheduled execution succeeded, it did not revert | `result: SUCCESS`, `scheduled: true` |
 | **The contract paid its own settlement fee** | 0.0503 HBAR debited from the contract, no user transaction |
-| Atomic open against the **real ATS bond and real USDC** | tx `0xee272d7c6f02972df1b6d2f254c38cf9ea731b53511d2708e80d669382a339bf`, 2,380,918 gas |
 | Independent HIP-1215 measurement | `ScheduleProbe`, schedule `0.0.10393574`, 134 ms |
-
-ATS bond: [`0xc2dadb01462b766bb2f58c9638b32e97200ca07d`](https://hashscan.io/testnet/contract/0xc2dadb01462b766bb2f58c9638b32e97200ca07d)
 
 The default branch is the one worth reading. At maturity, with the borrower unfunded, the network
 called `closeRepo`, it settled as `Defaulted`, the lender took the collateral, and the transaction
-came back **SUCCESS**. A scheduled transaction fires once and never retries, so a revert there
-would be a settlement that silently did not happen. Default is a business outcome, not an error,
-and the contract is written so it can never revert.
+came back **SUCCESS** with zero token transfers, because the check happens before anything moves. A
+scheduled transaction fires once and never retries, so a revert there would be a settlement that
+silently did not happen. Default is a business outcome, not an error, and the contract is written so
+it can never revert.
 
 ## How the sponsors are used
 
