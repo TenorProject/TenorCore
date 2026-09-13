@@ -27,16 +27,11 @@ cash in one transaction. Tenor is that missing settlement layer.
 
 ## What it does
 
-A borrower posts a tokenised bond as collateral and receives USDC. At maturity they repay and get
-the bond back, or they do not and the lender keeps it. Two hard parts, both solved on-chain:
+A borrower posts a tokenised bond as collateral and receives USDC. The price is set off-chain first: the borrower posts a funding request, lenders answer with signed EIP-712 quotes at zero gas, and the borrower picks the one they want.
 
-**The open must be atomic.** Cash and collateral cross in a single contract call. Either both move
-or neither does, so neither side is ever exposed.
+That choice triggers openRepo, one transaction that does everything at once: cash moves from lender to borrower, the bond goes into escrow, and the maturity unwind is scheduled as a HIP-1215 call in the same breath. This solves the two hard parts of a repo trade on-chain. The open is atomic, so neither side is ever exposed. The close happens on the date without a keeper, a cron job, or a clearinghouse standing in the way.
 
-**The close must actually happen on the date.** On every other chain that means a keeper bot, a
-cron job, or a clearinghouse that can fail on exactly the day it matters. Tenor hands the closing
-leg to the network at the moment the trade is struck, as a HIP-1215 scheduled contract call.
-Nobody runs it. Nobody can forget. Nobody pays for it but the contract itself.
+From there the borrower has two paths. Repay early with repayEarly, and the bond comes straight back. Or let maturity hit, and the scheduled close fires itself, transferring the collateral to the lender. Nobody runs it, nobody can forget it, nobody pays for it but the contract itself.
 
 ## Deployed on Hedera testnet
 
@@ -49,7 +44,7 @@ Nobody runs it. Nobody can forget. Nobody pays for it but the contract itself.
 
 ## Proven on Hedera testnet
 
-Not claims. Every row is a public transaction against the **real ATS bond and real USDC**.
+Every row is a public transaction against the **real ATS bond and real USDC**.
 
 | What | Evidence |
 |---|---|
@@ -61,12 +56,14 @@ Not claims. Every row is a public transaction against the **real ATS bond and re
 | **The contract paid its own settlement fee** | 0.0503 HBAR debited from the contract, no user transaction |
 | Independent HIP-1215 measurement | `ScheduleProbe`, schedule `0.0.10393574`, 134 ms |
 
-The default branch is the one worth reading. At maturity, with the borrower unfunded, the network
-called `closeRepo`, it settled as `Defaulted`, the lender took the collateral, and the transaction
-came back **SUCCESS** with zero token transfers, because the check happens before anything moves. A
-scheduled transaction fires once and never retries, so a revert there would be a settlement that
-silently did not happen. Default is a business outcome, not an error, and the contract is written so
-it can never revert.
+The default branch is the one worth understanding. At maturity, with the borrower unfunded, the
+network calls `closeRepo`, which checks funding before moving anything, marks the repo `Defaulted`,
+and transfers the escrowed collateral to the lender in the same call. A scheduled transaction fires
+once and never retries, so the contract is written to never revert here: default is a business
+outcome, not an error. If that transfer itself fails, for example a compliance check blocking the
+lender, the repo still finalizes as `Defaulted` rather than reverting, and delivery can be retried
+permissionlessly through `claimCollateral`. <!-- TODO: cite a fresh default tx hash against the
+current deployment here before submitting -->
 
 ## How the sponsors are used
 
@@ -161,9 +158,23 @@ about Hedera. The integration is proven on testnet only; see **[TESTNET.md](TEST
 
 ## AI assistance
 
-Claude was used for research, design review, and drafting parts of the contracts and docs. Every
-Hedera and ATS claim here was verified against the published v8.0.0 Solidity or against a testnet
-transaction, because both the documentation and the model were wrong in several places.
+Claude was used throughout, across both repos, in three concrete ways:
+
+- **Research and drafting.** Hedera and ATS behavior researched via Claude Code with the official
+  Hedera MCP servers (`hedera-docs`, `hedera-testnet`), then verified against the live ATS v8.0.0
+  Solidity or a real testnet transaction before anything was trusted. The Hedera docs got several
+  things wrong (the lock-hash DvP flow, clearing-mode irreversibility, hold expiration semantics);
+  see `TOOLING.md` and `.claude/skills/tenor-hedera/SKILL.md` for the specifics.
+- **Autocompletion during implementation.** Standard inline completion while writing Solidity,
+  scripts, and the frontend.
+- **Debugging.** Used to narrow down failures during testnet integration, particularly around
+  ATS compliance reverts and schedule service call encoding.
+
+Every architectural decision (RFQ over an order book, no oracle, bond over equity, dropping the
+ATS hold model for direct escrow) was made and is defended by the team; see "Design decisions
+worth defending" above. `CLAUDE.md`, `IMPLEMENTATION_PLAN.md`, `STATUS.md`, and `.claude/skills/`
+are committed in full and track the actual verified state of the project, not a plan written and
+abandoned. Judges are welcome to read them.
 
 ## Licence
 
